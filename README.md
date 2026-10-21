@@ -144,7 +144,7 @@ simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS
 All scenarios produce identical logical checksums, and Rust-written and
 C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. ROM is the
 one metric not yet at parity; the remaining gap is Rust bounds/runtime/harness
-overhead, and the size levers above are documented in `docs/BENCHMARKS.md` (the nightly `build-std` size build is measured at 12 144 B).
+overhead, and the size levers above are documented in `docs/BENCHMARKS.md` (the nightly `build-std` size build is measured at 12 144 B). Run `scripts/size_matrix.sh` to reproduce every configuration in one table.
 
 One build option is available for the size/CPU trade-off:
 `--features small-crc` (64-byte CRC table instead of 1 KiB, −948 B ROM, ~2x

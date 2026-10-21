@@ -137,20 +137,51 @@ on-flash format and behaviour identical:
   lookup-heavy scenarios perform 2–5x fewer reads (header/name matching instead
   of CRC-scanning values), and the weighted flash cost
   (read·1 + write·10 + erase·100) is never higher than C's. Host CPU time is
-  also lower in most scenarios; the TS iteration/range scenarios are ~1.4–1.6x slower in the default
-  compact build because the zero-latency simulator
-  exposes the per-entry dispatch cost that `fast-iter` removes (with
-  `fast-iter` all scenarios are at or below C). On real flash a single index
-  read costs microseconds, so a ~5 ns/entry difference is noise there.
+  also lower in 11 of 16 scenarios. The TS iteration/range scenarios are
+  ~1.4–1.6x slower in the host benchmark because the zero-latency simulator
+  exposes ~5 ns/entry of iterator decode overhead that on real flash is hidden
+  by a single index read (microseconds); their flash traffic is identical to C.
 * **ROM: still larger than C (+20% in the `-z` size profile; +12% with
-  `small-crc`; +6% in the smallest reproducible nightly build).** Attribute analysis
-  (`scripts/fw_rust.sh --symbols`) shows this is compiler/runtime overhead, not
-  algorithm size: the linked crate is ≈7.2 KiB of symbols plus ≈1.5–2.5 KiB
-  LTO-inlined into the harness, C's whole library (KVDB+TSDB+FAL+utils) is
-  7.7 KiB, and the Rust measurement harness is ≈3.9 KiB vs C's 2.0 KiB.
-  Bounds checks, `Result` plumbing, panic trampolines and slice helpers account
-  for most of the remaining text; a `min-size` build option using audited
-  unchecked slice access is the remaining lever (see `docs/DESIGN.md`).
+  `small-crc`; +6% in the smallest reproducible nightly build).**
+  `scripts/size_matrix.sh` reproduces all configurations in one table. Symbol
+  attribution (`scripts/fw_rust.sh --symbols` plus an opaque-boundary build in
+  which the crate's `mount_into`/`set`/`append` bodies are forced out of line)
+  splits the residual gap as follows: crate code ≈6.8 KiB of named symbols plus
+  ≈2.5 KiB LTO-inlined into the measurement harness; the genuine Rust harness
+  is ≈2.45 KiB vs C's ≈2.03 KiB; Rust runtime/panic scaffolding ≈0.45 KiB. C's
+  whole library (KVDB+TSDB+FAL+utils) is 7.7 KiB. So the gap is the cost of
+  bounds-checked safe code, `Result` plumbing, monomorphisation and the Rust
+  runtime — not of the algorithms, which are smaller than C's.
+
+### ROM floor investigation
+
+Over the optimisation rounds, the following changes were measured against the
+firmware `-z + small-crc` total and kept (negative results are listed too, so
+the floor is reproducible rather than assumed):
+
+| change | effect |
+|---|---:|
+| TSDB iterator-state shrink (no `SecInfo` per iterator), de-genericised index helpers, exact small writes | **−276 B** |
+| KVDB iterator-state shrink + `advance_kv(sec_end, hdr)` | −48 B |
+| KVDB mount: merge `recompute_oldest` + GC-pending scan | −92 B |
+| KVDB mount: ascending sector walks, fold oldest/GC detection into pass 1 | −124 B |
+| KVDB allocator: merge statistics + candidate scan, defer empty traversal | −184 B |
+| `continue_ff_addr` simplification | −16 B |
+| alternate state sizes / redundant `done` checks / stride-based end-info | −24 B |
+| harness: compact formatter, merged loops, shared error tags | −152 B (ROM) |
+| **measured, reverted** | |
+| global `#[inline(never)]` | +3 400 B |
+| opaque `black_box` call barriers | +604 B |
+| `#[inline(always)]` on `read_tsl` / `find_scan` / u32 helpers | +12…268 B |
+| splitting `read_sector_info` into header+traversal | +160 B |
+| `min-size` bounds-check removal (LLVM already elides most checks) | ±0 B |
+| LLVM merge-functions / outliner / MIR flags, thin LTO, CU=16 | 0…+1 800 B |
+
+The remaining ≈0.7 KiB cannot be removed without either audited-unchecked hot
+paths or dropping features (read CRC verification, crash recovery), both of
+which conflict with the crate's design goals. The size-optimised builds above
+are therefore the recommended trade-off; `small-crc` costs CPU only when large
+values are checksummed.
 
 ## 5. On-flash compatibility (differential)
 
