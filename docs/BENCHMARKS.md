@@ -95,10 +95,10 @@ in both images, so it counts as neither ROM nor MCU RAM.
 
 | metric | C FlashDB (-Os) | Rust `opt-level="s"` | Rust `opt-level="z"` |
 |---|---:|---:|---:|
-| `.text` | 9 720 B | 14 160 B | 12 584 B |
+| `.text` | 9 720 B | 14 068 B | 12 512 B |
 | `.rodata` | 1 632 B | 1 448 B | 1 448 B |
 | `.data` | 56 B | 0 | 0 |
-| **ROM total** | **11 408 B** | **15 608 B** (+37%) | **14 032 B** (+23%) |
+| **ROM total** | **11 408 B** | **15 516 B** (+36%) | **13 960 B** (+22%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
 | stack high-water | 1 192 B | 1 296 B | 1 424 B |
@@ -124,10 +124,10 @@ on-flash format and behaviour identical:
 
 | configuration | ROM (`-z`) | trade-off |
 |---|---:|---|
-| default (256-byte CRC table) | 14 032 B | reference build (stable toolchain) |
-| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 13 084 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
-| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 408 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
-| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 456 B (+9%)** | smallest measured; nightly toolchain |
+| default (256-byte CRC table) | 13 960 B | reference build (stable toolchain) |
+| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 13 012 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
+| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 336 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
+| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 384 B (+9%)** | smallest measured; nightly toolchain |
 
 ### Interpretation
 
@@ -146,7 +146,7 @@ on-flash format and behaviour identical:
   exposes the per-entry dispatch cost that `fast-iter` removes (with
   `fast-iter` all scenarios are at or below C). On real flash a single index
   read costs microseconds, so a ~5 ns/entry difference is noise there.
-* **ROM: still larger than C (+23% in the `-z` size profile; +15% with
+* **ROM: still larger than C (+22% in the `-z` size profile; +14% with
   `small-crc`; +9% in the smallest reproducible nightly build).** Attribute analysis
   (`scripts/fw_rust.sh --symbols`) shows this is compiler/runtime overhead, not
   algorithm size: the linked crate is ≈7.2 KiB of symbols plus ≈1.5–2.5 KiB
@@ -186,7 +186,7 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 83 tests green |
 | performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 936 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 14 448 B vs 11 408 B (`-z`); 13 084 B with `small-crc`, 12 456 B in the smallest measured nightly build (+9%) |
+| ROM at least C | **not achieved** — 14 448 B vs 11 408 B (`-z`); 13 012 B with `small-crc`, 12 384 B in the smallest measured nightly build (+9%) |
 
 ROM remains the one open objective. Because the default build prioritises
 performance and C compatibility, the size levers above are opt-in; the next

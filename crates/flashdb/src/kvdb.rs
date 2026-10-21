@@ -1723,21 +1723,19 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         self.in_recovery = true;
         let total = self.storage.sector_count();
 
-        // Pass 1: count damaged sector headers.
+        // Pass 1: count damaged sector headers (a plain ascending walk; mounts
+        // always visit every sector and the ring order only matters when
+        // combined sectors are in play, which the C writer never produces).
         let sec_size = self.storage.sec_size();
+        let max_size = self.storage.max_size();
         let mut failed = 0u32;
         let mut addr = 0u32;
-        let mut traversed = 0u32;
-        loop {
-            traversed += sec_size;
+        while addr < max_size {
             let sec = self.read_sector_info(addr, false)?;
             if !sec.check_ok {
                 failed += 1;
             }
-            addr = self.next_sector_addr(&sec, traversed);
-            if addr == FAILED_ADDR {
-                break;
-            }
+            addr += sec_size;
         }
 
         if failed == total {
@@ -1752,17 +1750,12 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         } else if failed > 0 {
             // Format only the damaged sectors.
             let mut addr = 0u32;
-            let mut traversed = 0u32;
-            loop {
-                traversed += sec_size;
+            while addr < max_size {
                 let sec = self.read_sector_info(addr, false)?;
                 if !sec.check_ok {
                     self.format_sector(addr, SECTOR_NOT_COMBINED)?;
                 }
-                addr = self.next_sector_addr(&sec, traversed);
-                if addr == FAILED_ADDR {
-                    break;
-                }
+                addr += sec_size;
             }
         }
 
