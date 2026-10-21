@@ -1009,11 +1009,14 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
     }
 
-    /// Find the oldest sector address, like `check_oldest_addr_cb` in C.
-    fn recompute_oldest(&mut self) -> Result<(), F::Error> {
+    /// One mount-time scan that computes the oldest sector address (C's
+    /// `check_oldest_addr_cb`) and whether a garbage collection was
+    /// interrupted (a sector left with dirty status GC).
+    fn inspect_sectors(&mut self) -> Result<(u32, bool), F::Error> {
         let sec_size = self.storage.sec_size();
         let mut oldest = 0u32;
         let mut prev = SectorStoreStatus::Unused;
+        let mut gc_pending = false;
         let mut addr = 0u32;
         let mut traversed = 0u32;
         loop {
@@ -1024,14 +1027,16 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             {
                 oldest = sec.addr;
             }
+            if sec.check_ok && sec.dirty == SectorDirtyStatus::Gc {
+                gc_pending = true;
+            }
             prev = sec.store;
             addr = self.next_sector_addr(&sec, traversed);
             if addr == FAILED_ADDR {
                 break;
             }
         }
-        self.storage.oldest_addr = oldest;
-        Ok(())
+        Ok((oldest, gc_pending))
     }
 
     // -- sector formatting --------------------------------------------------
@@ -1658,23 +1663,6 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
 
     // -- mount/recovery -----------------------------------------------------
 
-    fn has_gc_pending(&mut self) -> Result<bool, F::Error> {
-        let sec_size = self.storage.sec_size();
-        let mut addr = self.storage.oldest_addr;
-        let mut traversed = 0u32;
-        loop {
-            traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
-            if sec.check_ok && sec.dirty == SectorDirtyStatus::Gc {
-                return Ok(true);
-            }
-            addr = self.next_sector_addr(&sec, traversed);
-            if addr == FAILED_ADDR {
-                return Ok(false);
-            }
-        }
-    }
-
     /// One recovery pass over all live records (FlashDB `_fdb_kv_load`).
     fn recovery_scan(&mut self) -> Result<(), F::Error> {
         let lay = self.lay();
@@ -1756,6 +1744,11 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             // Unformatted partition (or all headers destroyed): format once.
             self.format_all()?;
             self.write_defaults(defaults)?;
+            // A freshly formatted database is empty: no oldest-sector scan,
+            // no interrupted GC and nothing to recover. This also saves the
+            // header reads those passes would perform on first boot.
+            self.in_recovery = false;
+            return Ok(());
         } else if failed > 0 {
             // Format only the damaged sectors.
             let mut addr = 0u32;
@@ -1773,10 +1766,11 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             }
         }
 
-        self.recompute_oldest()?;
+        let (oldest, gc_pending) = self.inspect_sectors()?;
+        self.storage.oldest_addr = oldest;
 
         // Resume an interrupted garbage collection, then recover records.
-        if self.has_gc_pending()? {
+        if gc_pending {
             self.gc_request = true;
             self.gc_collect()?;
         }
