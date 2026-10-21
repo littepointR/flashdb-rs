@@ -861,34 +861,30 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     }
 
     /// Find the start of the trailing erased area, like `_fdb_continue_ff_addr`.
+    ///
+    /// Returns the aligned address just after the last programmed byte, or
+    /// `end` when the region does not end in erased flash.
     fn continue_ff_addr(&mut self, start: u32, end: u32) -> Result<u32, F::Error> {
         const ERASED: u8 = 0xFF;
         let mut addr = start;
-        let mut last_data = 0u8;
-        let mut transition = start;
+        let mut last_programmed: Option<u32> = None;
         while addr < end {
             let mut buf = [0u8; 32];
-            let read_size = if addr + 32 < end {
-                32
-            } else {
-                (end - addr) as usize
-            };
-            if read_size == 0 {
-                break;
-            }
-            self.storage.read(addr, &mut buf[..read_size])?;
-            for (i, &b) in buf[..read_size].iter().enumerate() {
-                if last_data != ERASED && b == ERASED {
-                    transition = addr + i as u32;
+            let n = core::cmp::min(32, (end - addr) as usize);
+            self.storage.read(addr, &mut buf[..n])?;
+            for (i, b) in buf[..n].iter().enumerate() {
+                if *b != ERASED {
+                    last_programmed = Some(addr + i as u32);
                 }
-                last_data = b;
             }
             addr += 32;
         }
-        if last_data == ERASED {
-            Ok(align_up(transition as usize, low::wg_bytes(F::WRITE_GRAN_BITS)) as u32)
-        } else {
-            Ok(end)
+        match last_programmed {
+            Some(pos) => {
+                let aligned = align_up(pos as usize + 1, low::wg_bytes(F::WRITE_GRAN_BITS)) as u32;
+                Ok(core::cmp::min(aligned, end))
+            }
+            None => Ok(align_up(start as usize, low::wg_bytes(F::WRITE_GRAN_BITS)) as u32),
         }
     }
 
