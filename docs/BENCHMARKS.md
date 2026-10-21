@@ -101,8 +101,8 @@ in both images, so it counts as neither ROM nor MCU RAM.
 | **ROM total** | **11 408 B** | **15 636 B** (+37%) | **14 124 B** (+24%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
-| stack high-water | 1 192 B | 1 312 B | 1 432 B |
-| **static + stack RAM** | **2 256 B** | **1 936 B** (−14%) | **2 056 B** (−9%) |
+| stack high-water | 1 192 B | 1 296 B | 1 424 B |
+| **static + stack RAM** | **2 256 B** | **1 920 B** (−15%) | **2 048 B** (−9%) |
 | workload checksums | KV `0x4b3486a4`, TS `0x10d90680` | identical | identical |
 
 Per-phase stack high-water (diagnostic builds; `--phases`):
@@ -115,7 +115,7 @@ Per-phase stack high-water (diagnostic builds; `--phases`):
 | KV iterate | 560 B | 784 B | 856 B |
 | KV GC churn | 1 248 B | 1 424 B | 1 528 B |
 | TS append | 528 B | 680 B | 728 B |
-| TS iterate | 568 B | 824 B | 840 B |
+| TS iterate | 568 B | 784 B | 784 B |
 
 ### Size/performance options
 
