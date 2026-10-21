@@ -169,15 +169,15 @@ pub struct TslEntry<T: Timestamp = i32> {
 #[derive(Debug, Clone, Copy)]
 struct SecInfo<T: Timestamp> {
     addr: u32,
-    check_ok: bool,
-    status: SectorStoreStatus,
     start_time: T,
     end_time: T,
     end_idx: u32,
-    end_info_stat: [TslStatus; 2],
     remain: u32,
     empty_idx: u32,
     empty_data: u32,
+    check_ok: bool,
+    status: SectorStoreStatus,
+    end_info_stat: [TslStatus; 2],
 }
 
 impl<T: Timestamp> Default for SecInfo<T> {
@@ -261,8 +261,10 @@ pub struct TslIterator<'a, F: Flash, T: Timestamp = i32> {
     done: bool,
     /// First sector of the traversal, used by the by-time start condition.
     start_sector: u32,
-    /// Bookkeeping of the sector currently being iterated.
-    sec: SecInfo<T>,
+    /// Address of the sector currently being iterated.
+    sec_addr: u32,
+    /// Index address of the last record in the current sector.
+    sec_end_idx: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -347,31 +349,20 @@ fn prev_sector_addr(sec_addr: u32, traversed_len: u32, sec_size: u32, max_size: 
     }
 }
 
-/// `get_next_tsl_addr()`.
+/// `get_next_tsl_addr()`: next index record inside a sector that has entries.
 #[inline]
-fn next_tsl_addr<T: Timestamp>(sec: &SecInfo<T>, pre_index: u32, log_idx_size: u32) -> Option<u32> {
-    if sec.status == SectorStoreStatus::Empty {
-        return None;
-    }
-    if pre_index + log_idx_size <= sec.end_idx {
+fn next_tsl_addr(pre_index: u32, end_idx: u32, log_idx_size: u32) -> Option<u32> {
+    if pre_index + log_idx_size <= end_idx {
         Some(pre_index + log_idx_size)
     } else {
         None
     }
 }
 
-/// `get_last_tsl_addr()`.
+/// `get_last_tsl_addr()`: previous index record inside a sector that has entries.
 #[inline]
-fn prev_tsl_addr<T: Timestamp>(
-    sec: &SecInfo<T>,
-    pre_index: u32,
-    log_idx_size: u32,
-    sec_hdr_size: u32,
-) -> Option<u32> {
-    if sec.status == SectorStoreStatus::Empty {
-        return None;
-    }
-    if pre_index >= sec.addr + sec_hdr_size + log_idx_size {
+fn prev_tsl_addr(pre_index: u32, sec_addr: u32, log_idx_size: u32, sec_hdr_size: u32) -> Option<u32> {
+    if pre_index >= sec_addr + sec_hdr_size + log_idx_size {
         Some(pre_index - log_idx_size)
     } else {
         None
@@ -572,9 +563,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
          * the check loop visited it last (see below); FAILED_ADDR when unset. */
         let mut cached_cur_addr = FAILED_ADDR;
         let mut addr = 0u32;
-        let mut traversed_len = 0u32;
-        loop {
-            traversed_len = traversed_len.saturating_add(sec_size);
+        while addr < max_size {
             /* sector_iterator() reads the header once with traversal=false and
              * once more (with traversal) when the status filter matches. */
             let _ = self.read_sector_info(addr, false)?;
@@ -611,10 +600,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
                 cached_cur_addr = sec.addr;
                 /* not the current sector: only its header is cached */
             }
-            match next_sector_addr(sec.addr, traversed_len, sec_size, max_size) {
-                Some(next) => addr = next,
-                None => break,
-            }
+            addr += sec_size;
         }
 
         if check_failed {
@@ -744,7 +730,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             found_start: false,
             done: false,
             start_sector: start,
-            sec: SecInfo::default(),
+            sec_addr: 0,
+            sec_end_idx: 0,
         }
     }
 
@@ -762,7 +749,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             found_start: false,
             done: false,
             start_sector: start,
-            sec: SecInfo::default(),
+            sec_addr: 0,
+            sec_end_idx: 0,
         }
     }
 
@@ -785,7 +773,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             found_start: false,
             done: false,
             start_sector: start,
-            sec: SecInfo::default(),
+            sec_addr: 0,
+            sec_end_idx: 0,
         }
     }
 
@@ -854,6 +843,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
 
     /// End timestamp of the sector before `addr` (wrapping around), used when
     /// the current sector has no end info of its own.
+    #[inline(always)]
     fn read_previous_sector_end(&mut self, addr: u32) -> Result<T, F::Error> {
         let sec_size = self.storage.sec_size();
         let max_size = self.storage.max_size();
@@ -1013,12 +1003,20 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             sector_store_status_index(SectorStoreStatus::Empty),
         )?;
         /* the magic block is padded with erased bytes to uint32 alignment */
-        let mut magic = [F::ERASED_BYTE; MAX_ALIGN];
-        put_u32(&mut magic, 0, TSDB_SECTOR_MAGIC);
-        self.storage.write(
-            addr + layout.sec_magic_off,
-            &magic[..layout.uint32_align as usize],
-        )
+        if layout.uint32_align == 4 {
+            /* the magic word is exactly 4 bytes at WG<=32 */
+            self.storage.write(
+                addr + layout.sec_magic_off,
+                &TSDB_SECTOR_MAGIC.to_le_bytes(),
+            )
+        } else {
+            let mut magic = [F::ERASED_BYTE; MAX_ALIGN];
+            put_u32(&mut magic, 0, TSDB_SECTOR_MAGIC);
+            self.storage.write(
+                addr + layout.sec_magic_off,
+                &magic[..layout.uint32_align as usize],
+            )
+        }
     }
 
     /// Format every sector and reset the RAM bookkeeping (`tsl_format_all()`).
@@ -1026,16 +1024,11 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         let sec_size = self.storage.sec_size();
         let max_size = self.storage.max_size();
         let mut addr = 0u32;
-        let mut traversed_len = 0u32;
-        loop {
-            traversed_len = traversed_len.saturating_add(sec_size);
+        while addr < max_size {
             /* sector_iterator() reads each header before the callback runs. */
             let _ = self.read_sector_info(addr, false)?;
             self.format_sector(addr)?;
-            match next_sector_addr(addr, traversed_len, sec_size, max_size) {
-                Some(next) => addr = next,
-                None => break,
-            }
+            addr += sec_size;
         }
         self.storage.oldest_addr = 0;
         self.last_time = T::default();
@@ -1053,19 +1046,15 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         slot: usize,
     ) -> Result<(), F::Error> {
         let layout = self.lay();
-        let (stat_off, time_off, idx_off) = if slot == 0 {
-            (
-                layout.sec_end0_stat_off,
-                layout.sec_end0_time_off,
-                layout.sec_end0_idx_off,
-            )
+        /* end_info[1] is end_info[0] shifted by one end-info record. */
+        let off = if slot == 0 {
+            0
         } else {
-            (
-                layout.sec_end1_stat_off,
-                layout.sec_end1_time_off,
-                layout.sec_end1_idx_off,
-            )
+            layout.sec_end1_time_off - layout.sec_end0_time_off
         };
+        let stat_off = layout.sec_end0_stat_off + off;
+        let time_off = layout.sec_end0_time_off + off;
+        let idx_off = layout.sec_end0_idx_off + off;
         /* TSL_TIME_ALIGN_SIZE */
         let time_len = (layout.sec_end0_time_off - layout.sec_start_time_off) as usize;
 
@@ -1074,16 +1063,26 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             TSL_STATUS_NUM,
             tsl_status_index(TslStatus::PreWrite),
         )?;
-        let mut time = [F::ERASED_BYTE; MAX_ALIGN];
-        end_time.write_le(&mut time, 0);
-        self.storage
-            .write(sec_addr + time_off, &time[..time_len])?;
-        let mut index = [F::ERASED_BYTE; MAX_ALIGN];
-        put_u32(&mut index, 0, end_idx);
-        self.storage.write(
-            sec_addr + idx_off,
-            &index[..layout.uint32_align as usize],
-        )?;
+        if time_len <= 8 {
+            let mut time = [F::ERASED_BYTE; 8];
+            end_time.write_le(&mut time, 0);
+            self.storage.write(sec_addr + time_off, &time[..time_len])?;
+        } else {
+            let mut time = [F::ERASED_BYTE; MAX_ALIGN];
+            end_time.write_le(&mut time, 0);
+            self.storage
+                .write(sec_addr + time_off, &time[..time_len])?;
+        }
+        let idx_len = layout.uint32_align as usize;
+        if idx_len <= 8 {
+            let mut index = [F::ERASED_BYTE; 8];
+            put_u32(&mut index, 0, end_idx);
+            self.storage.write(sec_addr + idx_off, &index[..idx_len])?;
+        } else {
+            let mut index = [F::ERASED_BYTE; MAX_ALIGN];
+            put_u32(&mut index, 0, end_idx);
+            self.storage.write(sec_addr + idx_off, &index[..idx_len])?;
+        }
         self.storage.write_status(
             sec_addr + stat_off,
             TSL_STATUS_NUM,
@@ -1163,11 +1162,18 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
                 sector_store_status_index(SectorStoreStatus::Using),
             )?;
             /* save the start timestamp */
-            let mut time = [F::ERASED_BYTE; MAX_ALIGN];
-            cur_time.write_le(&mut time, 0);
             let time_len = (layout.sec_end0_time_off - layout.sec_start_time_off) as usize;
-            self.storage
-                .write(cur.addr + layout.sec_start_time_off, &time[..time_len])?;
+            if time_len <= 8 {
+                let mut time = [F::ERASED_BYTE; 8];
+                cur_time.write_le(&mut time, 0);
+                self.storage
+                    .write(cur.addr + layout.sec_start_time_off, &time[..time_len])?;
+            } else {
+                let mut time = [F::ERASED_BYTE; MAX_ALIGN];
+                cur_time.write_le(&mut time, 0);
+                self.storage
+                    .write(cur.addr + layout.sec_start_time_off, &time[..time_len])?;
+            }
         }
 
         self.cur_sec = cur;
@@ -1293,8 +1299,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
     /// payload bytes as an index record).
     fn index_bounds(&self) -> (u32, u32) {
         let layout = self.db.lay();
-        let first = self.sec.addr + layout.sec_hdr_size;
-        let last = self.sec.addr + self.db.storage.sec_size() - layout.log_idx_raw_size;
+        let first = self.sec_addr + layout.sec_hdr_size;
+        let last = self.sec_addr + self.db.storage.sec_size() - layout.log_idx_raw_size;
         (first, last)
     }
 
@@ -1309,6 +1315,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
             Ok(entry) => Some(Ok(entry)),
             Err(e) => {
                 self.done = true;
+                self.in_sector = false;
                 Some(Err(e))
             }
         }
@@ -1339,7 +1346,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
             let layout = self.db.lay();
             if sector_has_entries(&sec, layout.sec_hdr_size) {
                 self.next_index = sec.addr + layout.sec_hdr_size;
-                self.sec = sec;
+                self.sec_addr = sec.addr;
+                self.sec_end_idx = sec.end_idx;
                 self.in_sector = true;
             }
         }
@@ -1349,13 +1357,10 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
     /// Forward iteration over every entry (`fdb_tsl_iter`).
     fn next_forward(&mut self) -> Option<Result<TslEntry<T>, F::Error>> {
         loop {
-            if self.done {
-                return None;
-            }
             if self.in_sector {
                 let index = self.next_index;
                 let layout = self.db.lay();
-                match next_tsl_addr(&self.sec, index, layout.log_idx_size) {
+                match next_tsl_addr(index, self.sec_end_idx, layout.log_idx_size) {
                     Some(next) => self.next_index = next,
                     None => self.in_sector = false,
                 }
@@ -1386,8 +1391,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                 let index = self.next_index;
                 let layout = self.db.lay();
                 let next = prev_tsl_addr(
-                    &self.sec,
                     index,
+                    self.sec_addr,
                     layout.log_idx_size,
                     layout.sec_hdr_size,
                 );
@@ -1430,7 +1435,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                 let layout = self.db.lay();
                 if sector_has_entries(&sec, layout.sec_hdr_size) {
                     self.next_index = sec.end_idx;
-                    self.sec = sec;
+                    self.sec_addr = sec.addr;
+                    self.sec_end_idx = sec.end_idx;
                     self.in_sector = true;
                 }
             }
@@ -1460,9 +1466,9 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                 let index = self.next_index;
                 let layout = self.db.lay();
                 let next = if forward {
-                    next_tsl_addr(&self.sec, index, layout.log_idx_size)
+                    next_tsl_addr(index, self.sec_end_idx, layout.log_idx_size)
                 } else {
-                    prev_tsl_addr(&self.sec, index, layout.log_idx_size, layout.sec_hdr_size)
+                    prev_tsl_addr(index, self.sec_addr, layout.log_idx_size, layout.sec_hdr_size)
                 };
                 match next {
                     Some(next) => self.next_index = next,
@@ -1545,7 +1551,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                                 return Some(Err(e));
                             }
                         };
-                        self.sec = sec;
+                        self.sec_addr = sec.addr;
+                        self.sec_end_idx = sec.end_idx;
                         self.next_index = start;
                         self.in_sector = true;
                     }
