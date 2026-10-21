@@ -310,6 +310,22 @@ Build profiles:
    function pointers: harness bucket 6,456 → 3,880 B, crate 7,396 → 10,434 B,
    total ROM +476 B). Forcing the separation is therefore not a ROM win; the
    right fix is crate-side de-inlining.
+7. **Second harness ROM pass (task-7).** Compact decimal formatter (constant
+   division by 10 → multiply-high on Cortex-M3, no libgcc helper, no
+   powers-of-ten table), merged the initial+update KV loops, pointer-based TS
+   payload generation, four shared stage tags instead of seven, smaller
+   formatter buffer. Result on the frozen crate: `.text` 13,096 → 13,016 B,
+   `.rodata` 1,520 → 1,448 B, ROM 14,616 → **14,464 B** (`-z`); `-s` 16,156 →
+   **16,024 B**; stack/RAM unchanged, checksums unchanged. Genuine-harness
+   estimate (opaque-boundary method) 3,080 → **2,452 B** (`-z`) and 3,030 →
+   2,752 B (`-s`). Negative results: forcing crate calls out of line
+   (`black_box` barriers on `set`/`append`/both `mount_into`) gives genuine
+   harness 2,452 B but grows overall ROM by 604 B (`-z`) / 328 B (`-s`), so it
+   stays measurement-only; a plain `#[inline(never)]` wrapper around the
+   crate mount does not change inlining; inlining the single-use get/verify
+   helper grew ROM +12 B and stack +32 B (reverted); `thin` LTO and
+   `codegen-units=16` were both worse. `--phases`/`--symbols`/`--small-crc`
+   stay feature-gated so the baseline image is untouched.
 
 The firmware provides `_start`-style startup from the shared
 `common/startup_armv7m.S` via `core::arch::global_asm!(include_str!(...))`, the
@@ -357,7 +373,7 @@ boot, exactly like the C firmware's first-boot path.
 
 ## Measurement results
 
-**Frozen crate revision:** `27c8e6b` (HEAD at the time of measurement).
+**Frozen crate revision:** `e931c9d` (= `1486135` + docs-only commit), verified stable.
 **Harness:** this working tree (TS placement mount + `--small-crc` passthrough;
 no crate changes). Host: macOS arm64, QEMU 11.0.0, `mps2-an385`,
 `arm-none-eabi-gcc` 16.1.0 / binutils 2.46, rustc 1.96.1.
@@ -384,10 +400,10 @@ never counted as ROM or MCU RAM.
 
 | metric | C (FlashDB+FAL, `-Os`) | Rust `-s` (default) | Rust `-z` (default) |
 |---|---|---|---|
-| `.text` | 9720 | 14636 | 13096 |
-| `.rodata` | 1632 | 1520 | 1520 |
+| `.text` | 9720 | 14576 | 13016 |
+| `.rodata` | 1632 | 1448 | 1448 |
 | `.data` | 56 | 0 | 0 |
-| **ROM total** (`text+rodata+data`) | **11408** | **16156** | **14616** |
+| **ROM total** (`text+rodata+data`) | **11408** | **16024** | **14464** |
 | `.bss` | 1008 | 624 | 624 |
 | **static RAM** (`data+bss`) | **1064** | **624** | **624** |
 | **stack high-water** | **1192** | **1312** | **1432** |
@@ -406,9 +422,9 @@ lower total RAM than C (1936 vs 2256 B). ROM is still 4.7 KiB (`-s`) /
 
 | metric | Rust `-s` + small-crc | Rust `-z` + small-crc |
 |---|---|---|
-| `.text` | 14780 | 13108 |
-| `.rodata` | **560** | **560** |
-| **ROM total** | **15340** | **13668** |
+| `.text` | 14720 | 13028 |
+| `.rodata` | **488** | **488** |
+| **ROM total** | **15208** | **13516** |
 | `.bss` / static RAM | 624 / 624 | 624 / 624 |
 | stack high-water | 1312 | 1432 |
 | total RAM | 1936 | 2056 |
@@ -438,7 +454,7 @@ unaffected. One-line crate fix needed if the feature should be usable:
 | headline `stack` (max) | 1192 | 1312 | 1432 |
 
 Diagnostic-build ROM (not comparable to the headline):
-C 12032, Rust `-s` 18080, Rust `-z` 16284.
+C 12032, Rust `-s` 17964, Rust `-z` 16148.
 Per-phase numbers include each firmware's diagnostic frame (~100–300 B,
 present on both sides); compare deltas, not absolutes. The headline stack
 values (1312/1432 B) come from the non-diagnostic build.
@@ -448,15 +464,23 @@ values (1312/1432 B) come from the non-diagnostic build.
 | bucket | C | Rust `-s` | Rust `-z` |
 |---|---|---|---|
 | library code | 7674 (FlashDB/FAL, KV+TS) | 9038 (flashdb, KV+TS) | 7272 (flashdb, KV+TS) |
-| harness code | 2030 | 5530¹ | 5324¹ |
-| core/panic + outliner stubs | – | 22 | 450 |
+| harness code | 2030 | 5460¹ | 5244¹ |
+| core/panic + outliner stubs | – | 30 | 450 |
 | toolchain mem helpers | (inside harness/libgcc) | 138 | 138 |
-| `.text` (size -A) | 9720 | 14636 | 13096 |
+| `.text` (size -A) | 9720 | 14576 | 13016 |
 
 ¹ includes crate mount/append bodies inlined by LTO into the harness wrappers
 (`kv_mount`, `ts_mount`, `kv_put`, `tsdb_phase`). The bucket is therefore an
 upper bound on harness code; crate-side `#[inline(never)]` work reduces it
 without harness changes.
+
+**Genuine harness estimate** (opaque-boundary method: call `Kvdb::set`,
+`Tsdb::append`, `Kvdb::mount_into` and `Tsdb::mount_into` through
+`black_box`ed function pointers so their bodies are attributed to the crate;
+this changes no behaviour and is measurement-only because the barriers grow
+the total image): **2,452 B at `-z`** and **2,752 B at `-s`**, down from
+3,080 B / 3,030 B before this pass. The `-z` figure meets the 2.6 KiB target;
+the harness bucket's remaining ~2.8 KiB (`-z`) is inlined crate code.
 
 ### What is harness-side vs crate-side (frozen `27c8e6b`)
 
@@ -465,14 +489,15 @@ without harness changes.
   `-s` (1936 vs 2256), 200 B lower at `-z`.
 * **Stack**: Rust `-s` is 120 B above C (1312 vs 1192); the mount phase is
   880 vs 696 B. This is crate call depth (mount/GC paths), not harness
-  scaffolding.
-* **ROM**: Rust is 4748 B (`-s`) / 3208 B (`-z`) above C. Attribution: crate
-  named code is 9038 B (`-s`) vs C's 7674 B library, and the harness bucket
-  (5530 B) still contains inlined crate mount/append bodies. Rust runtime
-  baseline is small at `-s` (22 B core/panic) but 450 B at `-z` (outliner +
-  slice helpers). C's harness is 2030 B; the genuine Rust harness is larger
-  due to bounds-checked safe code, error plumbing and the workload's
-  verification/checksums.
+  scaffolding; the harness pass left stack unchanged.
+* **ROM**: Rust is 4616 B (`-s`) / 3056 B (`-z`) above C. Attribution: crate
+  named code is 9038 B (`-s`) / 7272 B (`-z`) vs C's 7674 B library, and the
+  harness bucket (5460 / 5244 B) still contains inlined crate mount/append
+  bodies (~2.8 KiB at `-z`). Genuine harness code is 2752 B (`-s`) / 2452 B
+  (`-z`) vs C's 2030 B; Rust runtime baseline adds 30 B (`-s`) / 450 B (`-z`,
+  outliner + slice helpers). The remaining harness delta is mostly
+  bounds-checked safe code, the generic error plumbing and the workload's
+  verification/checksums — all of which are kept intentionally.
 * `small-crc` is the cheapest remaining ROM lever (816–948 B) if a slower
   CRC32 is acceptable.
 

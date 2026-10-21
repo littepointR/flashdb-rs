@@ -109,30 +109,24 @@ fn write_bytes(s: &[u8]) {
 }
 
 fn write_u32(mut value: u32) {
-    // Decimal digits without integer division (same algorithm as the C side).
-    const POW10: [u32; 10] = [
-        1_000_000_000, 100_000_000, 10_000_000, 1_000_000, 100_000, 10_000, 1_000, 100, 10, 1,
-    ];
-    let mut buf = [b' '; 11];
-    let mut started = false;
+    // Decimal digits extracted by constant-division: `/ 10` and `% 10` on an
+    // unsigned 32-bit value lower to a multiply-high sequence on Cortex-M3
+    // (no __aeabi_uidiv call), which is much smaller than a powers-of-ten
+    // subtraction loop and needs no rodata table.  Max 10 digits.
+    let mut buf = [0u8; 11];
+    let mut p = 10;
 
-    for (i, &p) in POW10.iter().enumerate() {
-        let mut digit = 0u8;
-        while value >= p {
-            value -= p;
-            digit += 1;
-        }
-        if digit != 0 || started || p == 1 {
-            buf[i] = b'0' + digit;
-            started = true;
-        }
-    }
     buf[10] = 0;
-    let mut start = 0;
-    while start < 10 && buf[start] == b' ' {
-        start += 1;
+    loop {
+        p -= 1;
+        let q = value / 10;
+        buf[p] = b'0' + (value - q * 10) as u8;
+        value = q;
+        if value == 0 {
+            break;
+        }
     }
-    write_bytes(&buf[start..]);
+    write_bytes(&buf[p..]);
 }
 
 fn write_hex32(value: u32) {
@@ -176,11 +170,8 @@ fn fail(stage: &[u8], code: u32) -> ! {
 
 const TAG_KV_MOUNT: &[u8] = b"kv_mount\0";
 const TAG_TS_MOUNT: &[u8] = b"ts_mount\0";
-const TAG_KV_SET: &[u8] = b"kv_set\0";
-const TAG_KV_GET: &[u8] = b"kv_get\0";
-const TAG_KV_ITER: &[u8] = b"kv_iter\0";
-const TAG_TS_APPEND: &[u8] = b"ts_append\0";
-const TAG_TS_ITER: &[u8] = b"ts_iter\0";
+const TAG_KV: &[u8] = b"kv\0";
+const TAG_TS: &[u8] = b"ts\0";
 
 /// Unwrap a database operation, exiting through `fail()` on error.
 #[inline(always)]
@@ -768,19 +759,24 @@ fn make_kv_value(out: &mut [u8; KV_VALUE_LEN], idx: u32, gen: u32) {
 }
 
 fn make_ts_payload(out: &mut [u8; TS_PAYLOAD_LEN], idx: u32) {
+    // Raw pointer writes: fixed compile-time length, avoids bounds-check
+    // branches in the 200-iteration append loop.
     let tick = TS_BASE_TIME + idx;
-    out[0] = idx as u8;
-    out[1] = (idx >> 8) as u8;
-    out[2] = (idx >> 16) as u8;
-    out[3] = (idx >> 24) as u8;
-    out[4] = tick as u8;
-    out[5] = (tick >> 8) as u8;
-    out[6] = (tick >> 16) as u8;
-    out[7] = (tick >> 24) as u8;
-    let mut k = 8;
-    while k < TS_PAYLOAD_LEN {
-        out[k] = (idx.wrapping_mul(31) + (k as u32).wrapping_mul(7)) as u8;
-        k += 1;
+    let p = out.as_mut_ptr();
+    unsafe {
+        *p = idx as u8;
+        *p.add(1) = (idx >> 8) as u8;
+        *p.add(2) = (idx >> 16) as u8;
+        *p.add(3) = (idx >> 24) as u8;
+        *p.add(4) = tick as u8;
+        *p.add(5) = (tick >> 8) as u8;
+        *p.add(6) = (tick >> 16) as u8;
+        *p.add(7) = (tick >> 24) as u8;
+        let mut k = 8;
+        while k < TS_PAYLOAD_LEN {
+            *p.add(k) = (idx.wrapping_mul(31) + (k as u32).wrapping_mul(7)) as u8;
+            k += 1;
+        }
     }
 }
 
@@ -818,7 +814,7 @@ fn kv_put(db: &mut KvDb, idx: u32, gen: u32) {
     make_kv_key(&mut key, idx);
     make_kv_value(&mut value, idx, gen);
     if db.set(&key, &value).is_err() {
-        fail(TAG_KV_SET, idx);
+        fail(TAG_KV, idx);
     }
 }
 
@@ -832,10 +828,10 @@ fn kv_get_verified(db: &mut KvDb, idx: u32, buf: &mut [u8; KV_VALUE_LEN]) {
     make_kv_value(&mut expected, idx, expected_gen(idx));
     match db.get(&key, buf) {
         Ok(Some(got)) if got == KV_VALUE_LEN => {}
-        _ => fail(TAG_KV_GET, idx),
+        _ => fail(TAG_KV, idx),
     }
     if unsafe { memcmp(buf.as_ptr(), expected.as_ptr(), KV_VALUE_LEN) } != 0 {
-        fail(TAG_KV_GET, idx);
+        fail(TAG_KV, idx);
     }
 }
 
@@ -845,19 +841,18 @@ fn kv_phase(m: &mut Metrics) {
     let mut read_buf = [0u8; KV_VALUE_LEN];
     let mut iter_buf = [0u8; KV_VALUE_LEN];
 
-    // 1. initial set of all keys, 2. update half of them
+    // 1. initial set of all keys, 2. update half of them (one loop: C does
+    //    the same two sequential passes; the branch is once per iteration).
     let mut i = 0u32;
-    while i < KV_KEYS {
-        kv_put(db, i, 0);
+    while i < KV_KEYS + KV_UPDATES {
+        if i < KV_KEYS {
+            kv_put(db, i, 0);
+        } else {
+            kv_put(db, i - KV_KEYS, 1);
+        }
         i += 1;
     }
-    m.kv_writes += KV_KEYS;
-    i = 0;
-    while i < KV_UPDATES {
-        kv_put(db, i, 1);
-        i += 1;
-    }
-    m.kv_writes += KV_UPDATES;
+    m.kv_writes += KV_KEYS + KV_UPDATES;
 
     // 3. GC churn: rewrite a small key set many times so the database has to
     //    erase and migrate sectors (same pattern as the C workload).
@@ -883,16 +878,16 @@ fn kv_phase(m: &mut Metrics) {
     //    separately from kv_checksum.
     let mut it = db.iter();
     while let Some(entry) = it.next() {
-        let entry = ok_or_fail(entry, TAG_KV_ITER);
+        let entry = ok_or_fail(entry, TAG_KV);
         m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, entry.name());
-        let got = ok_or_fail(it.read_value(&entry, &mut iter_buf), TAG_KV_ITER);
+        let got = ok_or_fail(it.read_value(&entry, &mut iter_buf), TAG_KV);
         let got_slice = unsafe { core::slice::from_raw_parts(iter_buf.as_ptr(), got.min(iter_buf.len())) };
         m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, got_slice);
         m.kv_iterated += 1;
     }
 
     if m.kv_iterated != KV_KEYS {
-        fail(TAG_KV_ITER, m.kv_iterated);
+        fail(TAG_KV, m.kv_iterated);
     }
 }
 
@@ -915,7 +910,7 @@ fn tsdb_phase(m: &mut Metrics) {
     // append phase
     while i < TS_APPENDS {
         make_ts_payload(&mut payload, i);
-        ok_or_fail(db.append((TS_BASE_TIME + i) as i32, &payload), TAG_TS_APPEND);
+        ok_or_fail(db.append((TS_BASE_TIME + i) as i32, &payload), TAG_TS);
         m.ts_appends += 1;
         i += 1;
     }
@@ -924,10 +919,10 @@ fn tsdb_phase(m: &mut Metrics) {
     let mut it = db.iter();
     let mut n = 0u32;
     while let Some(entry) = it.next() {
-        let entry = ok_or_fail(entry, TAG_TS_ITER);
-        let got = ok_or_fail(it.read_blob(&entry, &mut read_buf), TAG_TS_ITER);
+        let entry = ok_or_fail(entry, TAG_TS);
+        let got = ok_or_fail(it.read_blob(&entry, &mut read_buf), TAG_TS);
         if got != TS_PAYLOAD_LEN {
-            fail(TAG_TS_ITER, got as u32);
+            fail(TAG_TS, got as u32);
         }
         m.ts_iterated += 1;
         let got_slice =
@@ -936,7 +931,7 @@ fn tsdb_phase(m: &mut Metrics) {
         n += 1;
     }
     if n != TS_APPENDS {
-        fail(TAG_TS_ITER, n);
+        fail(TAG_TS, n);
     }
 }
 
