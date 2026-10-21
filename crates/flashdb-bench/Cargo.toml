@@ -7,7 +7,3 @@ license.workspace = true
 [dependencies]
 flashdb = { path = "../flashdb" }
 flashdb-sim = { path = "../flashdb-sim" }
-
-[features]
-# Forward the library's performance-oriented TS iterator dispatch.
-fast-iter = ["flashdb/fast-iter"]

@@ -229,8 +229,7 @@ enum IterMode<T: Timestamp> {
     ByTime { from: T, to: T },
 }
 
-/// Per-mode stepping function used by [`TslIterator::next`] (compact dispatch).
-#[cfg(not(feature = "fast-iter"))]
+/// Per-mode stepping function used by [`TslIterator::next`].
 #[allow(type_alias_bounds)] // the bound is needed to name `F::Error`
 type NextFn<'a, F: Flash, T> = for<'b> fn(
     &'b mut TslIterator<'a, F, T>,
@@ -246,9 +245,7 @@ pub struct TslIterator<'a, F: Flash, T: Timestamp = i32> {
     mode: IterMode<T>,
     /// Stepping function for this iterator's mode. Storing the function
     /// pointer (instead of a runtime `match` in `Iterator::next`) lets a
-    /// `no_std` build drop the modes it never constructs; this is the compact
-    /// default. With the `fast-iter` feature the dispatch is a direct match.
-    #[cfg(not(feature = "fast-iter"))]
+    /// `no_std` build drop the modes it never constructs.
     next: NextFn<'a, F, T>,
     /// Sector to read next (or [`FAILED_ADDR`] when there is none).
     sector_addr: u32,
@@ -739,7 +736,6 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         TslIterator {
             db: self,
             mode: IterMode::Forward,
-            #[cfg(not(feature = "fast-iter"))]
             next: TslIterator::next_forward,
             sector_addr: start,
             traversed_len: 0,
@@ -758,7 +754,6 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         TslIterator {
             db: self,
             mode: IterMode::Reverse,
-            #[cfg(not(feature = "fast-iter"))]
             next: TslIterator::next_reverse,
             sector_addr: start,
             traversed_len: 0,
@@ -782,7 +777,6 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         TslIterator {
             db: self,
             mode: IterMode::ByTime { from, to },
-            #[cfg(not(feature = "fast-iter"))]
             next: TslIterator::next_by_time_entry,
             sector_addr: start,
             traversed_len: 0,
@@ -1447,8 +1441,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
         }
     }
 
-    /// Entry point for [`IterMode::ByTime`] iteration (compact dispatch only).
-    #[cfg(not(feature = "fast-iter"))]
+    /// Entry point for [`IterMode::ByTime`] iteration.
     fn next_by_time_entry(&mut self) -> Option<Result<TslEntry<T>, F::Error>> {
         match self.mode {
             IterMode::ByTime { from, to } => self.next_by_time(from, to),
@@ -1569,18 +1562,7 @@ impl<'a, F: Flash, T: Timestamp> Iterator for TslIterator<'a, F, T> {
     type Item = Result<TslEntry<T>, F::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        #[cfg(not(feature = "fast-iter"))]
-        {
-            let next = self.next;
-            next(self)
-        }
-        #[cfg(feature = "fast-iter")]
-        {
-            match self.mode {
-                IterMode::Forward => self.next_forward(),
-                IterMode::Reverse => self.next_reverse(),
-                IterMode::ByTime { from, to } => self.next_by_time(from, to),
-            }
-        }
+        let next = self.next;
+        next(self)
     }
 }

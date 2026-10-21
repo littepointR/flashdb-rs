@@ -119,14 +119,13 @@ Per-phase stack high-water (diagnostic builds; `--phases`):
 
 ### Size/performance options
 
-The library exposes two build options that trade ROM for CPU; both keep the
+The library exposes one build option that trades ROM for CPU; it keeps the
 on-flash format and behaviour identical:
 
 | configuration | ROM (`-z`) | trade-off |
 |---|---:|---|
 | default (compact iterator dispatch, 256-byte CRC table) | 14 616 B | per-entry indirect dispatch in TS iteration; equal to C on real flash, where a flash read dominates |
 | default + `--features small-crc` | 13 668 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
-| `--features fast-iter` | ≈15.6 KiB | direct dispatch; host CPU parity on every scenario |
 | `small-crc` + nightly `build-std` (compact iterator) | ≈13.1 KiB | measured on an earlier tree; not reproduced on the frozen commit (nightly toolchain) |
 
 ### Interpretation
@@ -180,7 +179,7 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | objective | result |
 |---|---|
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 83 tests green |
-| performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build; all scenarios with `fast-iter` |
+| performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 936 B vs 2 256 B (`-s`) |
 | ROM at least C | **not achieved** — 14 616 B vs 11 408 B (`-z`); 13 668 B with `small-crc` |
 

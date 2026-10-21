@@ -258,7 +258,6 @@ profile (see the report for the per-toolchain options and the remaining
 | cargo feature | effect |
 |---|---|
 | `small-crc` | CRC32 uses a 64-byte nibble table instead of the 1 KiB byte table: −960 B `.rodata`, ~2x CRC CPU (matters only for large values). |
-| `fast-iter` | TS iterator dispatch is a direct `match` instead of a stored function pointer: faster per-entry CPU, ~+1 KiB ROM. |
 
 The default is performance-and-compatibility oriented; `small-crc` is for
 ROM-sensitive builds. Both preserve the on-flash format and behaviour.

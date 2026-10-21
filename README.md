@@ -139,16 +139,16 @@ simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS
 | static + stack RAM | 2 256 B | **2 056 B** |
 | KV flash reads (hot get / miss / update / iterate) | 6 000 / 159 / 11.1 / 15.9 per op | **4 / 37 / 8.0 / 6.9** |
 | TS flash reads / writes / erases | identical to C in every scenario | identical |
-| host CPU | baseline | faster in 11/16 scenarios in the default build; all 16 with `--features fast-iter` |
+| host CPU | baseline | faster in 11/16 scenarios in the default build |
 
 All scenarios produce identical logical checksums, and Rust-written and
 C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. ROM is the
 one metric not yet at parity; the remaining gap is Rust bounds/runtime/harness
 overhead, and the size levers above are documented in `docs/BENCHMARKS.md` (a nightly `build-std` size build is expected to shave another ~0.5 KiB).
 
-Two per-DB build options are available for size/CPU trade-offs:
-`--features small-crc` (64-byte CRC table, −960 B ROM) and
-`--features fast-iter` (direct TS iterator dispatch, faster CPU, +~1 KiB ROM).
+One build option is available for the size/CPU trade-off:
+`--features small-crc` (64-byte CRC table instead of 1 KiB, −948 B ROM, ~2x
+CRC CPU which only matters for large values).
 
 ## License
 
