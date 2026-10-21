@@ -15,8 +15,10 @@
 //! * **Typed errors.** [`Error`] carries the flash driver's own error type and
 //!   says which operation failed, instead of collapsing everything into
 //!   `FDB_READ_ERR`.
-//! * **`no_std`, no allocation, no `unsafe`.** All buffers are stack or
-//!   caller-provided; the crate has `#![forbid(unsafe_code)]`.
+//! * **`no_std`, no allocation, no global state.** All buffers are stack or
+//!   caller-provided. The crate is `#![deny(unsafe_code)]` with a single
+//!   audited exception: placement initialization of a database inside
+//!   `MaybeUninit` (`mount_into`), so static databases need no stack copy.
 //! * **Iterators instead of callbacks.** KV and TS iteration are `Iterator`s
 //!   (and TS iterators support forward, reverse and by-time modes) instead of
 //!   C callbacks taking `void *args`.
@@ -70,7 +72,7 @@
 //! implementation (`harness/`).
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 #[cfg(test)]

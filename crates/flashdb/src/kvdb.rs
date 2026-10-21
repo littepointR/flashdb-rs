@@ -487,6 +487,10 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     ///
     /// If the whole partition is unformatted (or all sector headers are
     /// damaged), the database is formatted and mounted empty.
+    ///
+    /// For a database stored in a `static` (the usual embedded pattern on
+    /// RAM-constrained MCUs), use [`KvdbImpl::mount_into`] instead: it avoids
+    /// the stack copy of the database struct.
     pub fn mount(flash: F, config: Config) -> Result<Self, F::Error> {
         Self::mount_with_defaults(flash, config, &[])
     }
@@ -510,6 +514,63 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         };
         db.load(defaults)?;
         Ok(db)
+    }
+
+    /// Initialize a database **in place** in caller-provided storage.
+    ///
+    /// This is the embedded-friendly form of [`KvdbImpl::mount`]: instead of
+    /// constructing the (larger, cache-carrying) database on the stack and
+    /// returning it by value, the fields are written directly into the slot.
+    /// A static database therefore costs no stack copy:
+    ///
+    /// ```no_run
+    /// # use flashdb::{Config, Flash, Kvdb};
+    /// # use core::mem::MaybeUninit;
+    /// # fn demo<F: Flash>(flash: F) -> Result<(), flashdb::Error<F::Error>> {
+    /// static mut DB: MaybeUninit<Kvdb<F>> = MaybeUninit::uninit();
+    /// # unsafe {
+    /// flashdb::Kvdb::mount_into(&mut *core::ptr::addr_of_mut!(DB), flash, Config::new(4096, 16384))?;
+    /// # }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// `defaults` are written when the partition has to be formatted, exactly
+    /// like [`KvdbImpl::mount_with_defaults`].
+    #[allow(unsafe_code)]
+    pub fn mount_with_defaults_into(
+        slot: &mut core::mem::MaybeUninit<Self>,
+        flash: F,
+        config: Config,
+        defaults: &[(&str, &[u8])],
+    ) -> Result<(), F::Error> {
+        let storage = Storage::new(flash, config)?;
+        // SAFETY: all fields of `Self` are initialized exactly once below.
+        // `MaybeUninit` guarantees the memory is valid for `Self` and has the
+        // right alignment; `addr_of_mut!` does not create a reference to the
+        // (not yet initialized) value, so no invalid reference is formed.
+        unsafe {
+            let p = slot.as_mut_ptr();
+            core::ptr::addr_of_mut!((*p).storage).write(storage);
+            core::ptr::addr_of_mut!((*p).cur_sec).write(SecInfo::UNKNOWN);
+            core::ptr::addr_of_mut!((*p).cache).write([CacheSlot::EMPTY; CACHE]);
+            core::ptr::addr_of_mut!((*p).cache_lru).write(0);
+            core::ptr::addr_of_mut!((*p).gc_request).write(false);
+            core::ptr::addr_of_mut!((*p).in_recovery).write(false);
+            core::ptr::addr_of_mut!((*p).last_is_complete_del).write(false);
+        }
+        // SAFETY: every field was initialized above.
+        let db = unsafe { slot.assume_init_mut() };
+        db.load(defaults)
+    }
+
+    /// Placement form of [`KvdbImpl::mount`] (no defaults).
+    pub fn mount_into(
+        slot: &mut core::mem::MaybeUninit<Self>,
+        flash: F,
+        config: Config,
+    ) -> Result<(), F::Error> {
+        Self::mount_with_defaults_into(slot, flash, config, &[])
     }
 
     /// Consume the database and return the flash driver.

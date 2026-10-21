@@ -658,10 +658,12 @@ static TS_DB: DbCell<TsDb> = DbCell(UnsafeCell::new(MaybeUninit::uninit()));
 fn kv_mount() {
     let flash = kv_flash();
     flash.erase_all();
-    match Kvdb::mount(flash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)) {
-        Ok(db) => unsafe {
-            (*KV_DB.0.get()).write(db);
-        },
+    // Placement initialization: the database (including its 512-byte name
+    // cache) is built directly in .bss, so mounting costs no stack copy.
+    // FlashDB-C has the same property because fdb_kvdb_init() takes a pointer.
+    let slot = unsafe { &mut *KV_DB.0.get() };
+    match Kvdb::mount_into(slot, flash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)) {
+        Ok(()) => {}
         Err(_) => fail(b"kv_mount\0", 0),
     }
 }
