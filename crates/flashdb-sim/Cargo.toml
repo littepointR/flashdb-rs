@@ -1,0 +1,8 @@
+[package]
+name = "flashdb-sim"
+description = "RAM flash simulator with op accounting and fault injection for flashdb tests and benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

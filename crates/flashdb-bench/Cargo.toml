@@ -1,0 +1,9 @@
+[package]
+name = "flashdb-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flashdb = { path = "../flashdb" }
+flashdb-sim = { path = "../flashdb-sim" }

@@ -1,0 +1,17 @@
+[package]
+name = "flashdb"
+description = "FlashDB rewritten in Rust: ultra-lightweight embedded KVDB and TSDB for NOR/NAND flash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enable implementation for embedded-storage traits (optional)
+# embedded-storage = ["dep:embedded-storage"]
+# defmt = ["dep:defmt"]
+
+[dependencies]
+
+[dev-dependencies]
+flashdb-sim = { path = "../flashdb-sim" }
