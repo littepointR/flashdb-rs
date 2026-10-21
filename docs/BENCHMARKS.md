@@ -184,12 +184,17 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 90 tests green |
 | performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 880 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 13 960 B vs 11 408 B (`-z`); 13 012 B with `small-crc`, 12 384 B in the smallest measured nightly build (+8.6%) |
+| ROM at least C | **not achieved** — 13 776 B vs 11 408 B (`-z`); 12 828 B with `small-crc`, 12 188 B in the smallest measured nightly build (+6.8%) |
 
-ROM remains the one open objective. Because the default build prioritises
-performance and C compatibility, the size levers above are opt-in; the next
-work item is a `min-size` feature that replaces checked slicing/indexing in hot
-decode paths with audited unsafe access to close the remaining ≈2–3 KiB.
+ROM remains the one open objective. The residual ≈0.8 KiB is the price of the
+safe-Rust design, quantified by the attribution above: the crate's own code is
+≈1–1.5 KiB larger than FlashDB-C's library (bounds checks, `Result` plumbing,
+monomorphisation), the measurement harness is ≈0.4 KiB larger, and ≈0.45 KiB is
+Rust runtime/panic scaffolding that `-Z build-std` already shrinks as far as the
+toolchain allows. Closing the gap would require audited-unsafe unchecked hot
+paths or dropping integrity/recovery features, both of which conflict with the
+crate's design goals; the size-optimised configurations in §4 are the
+recommended trade-off.
 
 ## 7. Reproducing the reported numbers
 
