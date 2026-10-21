@@ -169,6 +169,10 @@ image (KV + TS partitions), then each implementation mounts the other's image.
 * Interrupted-operation recovery: the Rust test suite injects a flash fault at
   every write during a workload and remounts; the DB is always consistent and
   usable afterwards (C has no automated equivalent).
+* The `continue_ff_addr` traversal rewrite was additionally differential-fuzzed
+  against C's `_fdb_continue_ff_addr`: 1.8 M adversarial/random NOR patterns
+  (granules 1…256 bits) → 0 mismatches, plus 31 corrupted-image read/write
+  variants where C and Rust outputs are identical.
 
 `cargo test -p flashdb --release` runs 83 tests plus 7 doctests, including the
 original C test cases ported assertion-for-assertion

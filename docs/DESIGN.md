@@ -300,6 +300,14 @@ valid data.
 * **Big-endian flash layout** (`FDB_BIG_ENDIAN`) is not supported.
 * **File mode** (`FDB_USING_FILE_*`) is not ported: the crate targets raw
   flash. A file-backed `Flash` implementation is a user-side adapter.
+* **Mount-then-continue-write physical placement.** When mounting an existing
+  image whose ring does not start at sector 0, the Rust mount computes the
+  actual oldest sector from the headers, while FlashDB-C (due to a zeroed
+  sector cache consulted before its first fill) keeps `oldest_addr = 0`. Both
+  views are logically consistent and `check()` passes; only the physical
+  sector chosen for the first post-mount allocation can differ. Deterministic
+  workloads that start from erased flash (and all benchmark/image workloads)
+  are byte-identical.
 * **64-bit timestamps** are selected with the type parameter instead of a
   build macro; the resulting format matches the C option.
 * **Write granularities 64/128/256** have layout tables and algorithms, but
