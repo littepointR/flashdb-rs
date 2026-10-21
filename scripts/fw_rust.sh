@@ -8,9 +8,9 @@
 # under qemu-system-arm and prints the same semihosting RESULT line as
 # scripts/fw_c.sh: ROM/RAM section sizes, worst-case stack, workload checksums.
 #
-# The Rust TSDB API is not integrated yet; the TSDB part of the workload is a
-# placeholder that produces the same deterministic payload stream as the C
-# firmware, so ts_checksum is already directly comparable.
+# The workload is the same as scripts/fw_c.sh: KVDB set/update/GC-churn/get/
+# iterate and TSDB append/iterate over a 16 KiB KV + 16 KiB TS partition pair
+# of simulated NOR, with deterministic payloads so checksums are comparable.
 #
 # Usage:
 #   scripts/fw_rust.sh                 # release profile (opt-level="s", LTO)
@@ -155,10 +155,10 @@ echo "-- ELF sections (arm-none-eabi-size -A) --"
 "$SIZE" -A "$ELF"
 echo
 echo "   defined workloads: KVDB 64 set + 32 update + 1500 churn + 64 verified get"
-echo "                      + full iterate (real flashdb crate); TSDB placeholder"
-echo "                      200 append + 200 'iterate' (deterministic payloads)"
-echo "   simulated NOR: 16 KiB KVDB partition in the .sim_flash NOLOAD region"
-echo "                  (no TS partition until the real TSDB API is wired in)"
+echo "                      + full iterate; TSDB 200 append + full forward iterate"
+echo "                      (real flashdb KVDB and TSDB crates)"
+echo "   simulated NOR: 16 KiB KVDB + 16 KiB TSDB partitions in the .sim_flash"
+echo "                  NOLOAD region (32 KiB total)"
 echo
 if [ "$SYMBOLS" = "1" ]; then
   command -v python3 >/dev/null 2>&1 || die "python3 is required for --symbols"

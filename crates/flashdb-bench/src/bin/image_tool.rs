@@ -32,10 +32,10 @@
 //! `fdb_err_t`, 255 = I/O) and exits 2.
 
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use flashdb::{Config, Error, Flash, Kvdb, Tsdb, TslStatus};
+use flashdb::{Config, Error, Kvdb, Tsdb, TslStatus};
 use flashdb_sim::{RamFlash, SimError};
 
 /// FlashDB sector (erase block) size.
@@ -120,15 +120,6 @@ impl ToolError {
         }
     }
 
-    fn message(&self) -> String {
-        match self {
-            ToolError::Db(e) => format!("{e}"),
-            ToolError::WouldFormat => {
-                "mounting would format or modify the image; refusing to touch it".to_string()
-            }
-            ToolError::Io(s) => s.clone(),
-        }
-    }
 }
 
 /// Map the Rust error back to the C `fdb_err_t` the image tool would report.
@@ -470,8 +461,12 @@ fn run<const WG: u32>(cmd: &str, path: Option<&str>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            if let ToolError::Io(msg) = &e {
-                eprintln!("image_tool: {msg}");
+            match &e {
+                ToolError::Io(msg) => eprintln!("image_tool: {msg}"),
+                ToolError::WouldFormat => eprintln!(
+                    "image_tool: mounting would format or modify the image; refusing to touch it"
+                ),
+                ToolError::Db(err) => eprintln!("image_tool: database error: {err}"),
             }
             println!("ERROR={}", e.code());
             2

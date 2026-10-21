@@ -56,6 +56,8 @@ struct harness_metrics {
     uint32_t st_get;
     uint32_t st_iter;
     uint32_t st_gc;
+    uint32_t st_ts_append;
+    uint32_t st_ts_iter;
 #endif
 
     /* Workload results. */

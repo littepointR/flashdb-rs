@@ -460,6 +460,17 @@ fn kv_len(lay: &KvLayout, wg: u32, name_len: usize, value_len: usize) -> u32 {
     lay.kv_hdr_size + wg_align(name_len, wg) as u32 + wg_align(value_len, wg) as u32
 }
 
+/// CRC prefix for `name_len`.
+///
+/// C computes `fdb_calc_crc32(0, &kv_hdr.name_len, sizeof(uint32_t))`: that
+/// hashes the `u8` plus the three following struct-padding bytes, which the
+/// `memset(&kv_hdr, FDB_BYTE_ERASED, ...)` left at 0xFF. Hashing `name_len` as
+/// a `u32` (zero padding) makes every KV CRC disagree with C.
+#[inline]
+fn crc_name_len(crc: u32, name_len: u8) -> u32 {
+    crc32(crc, &[name_len, 0xFF, 0xFF, 0xFF])
+}
+
 #[inline]
 fn crc_pad(mut crc: u32, pad: usize) -> u32 {
     const PAD: [u8; 32] = [0xFF; 32];
@@ -837,7 +848,15 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             loop {
                 let hdr = self.read_kv_header(kv_addr)?;
                 if !hdr.valid && hdr.status != KvStatus::PreWrite && hdr.status != KvStatus::ErrHdr {
-                    sec.remain = 0;
+                    if hdr.erased {
+                        // Trailing erased area: C's sector cache keeps this
+                        // sector's empty_kv/remain up to date, i.e. the free
+                        // space after the last valid record. Reporting 0 here
+                        // would make alloc/GC stop decisions disagree with C.
+                        sec.remain = sec_size - (sec.empty_kv - addr);
+                    } else {
+                        sec.remain = 0;
+                    }
                     break;
                 }
                 sec.empty_kv += hdr.len;
@@ -1073,8 +1092,9 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         let is_full = self.update_sec_status(&mut sec, len)?;
         self.cur_sec = sec;
 
-        // CRC32 over name_len, value_len, name (+padding), value (+padding).
-        let mut crc = crc32_u32(0, name_len as u32);
+        // CRC32 over name_len (+ struct padding), value_len, name (+padding),
+        // value (+padding).
+        let mut crc = crc_name_len(0, name_len);
         crc = crc32_u32(crc, value_len);
         crc = crc32(crc, key);
         crc = crc_pad(crc, wg_align(key.len(), wg) - key.len());
@@ -1243,7 +1263,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         let aligned_name = wg_align(name_len, wg);
         let aligned_value = wg_align(value_len, wg);
 
-        let mut crc = crc32_u32(0, name_len as u32);
+        let mut crc = crc_name_len(0, entry.name_len);
         crc = crc32_u32(crc, entry.value_len);
 
         let mut name_buf = [0u8; KV_NAME_MAX];
@@ -1423,7 +1443,8 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             Some(remain) => remain,
             None => {
                 // First collected sector in this GC pass: C reads the sector at
-                // `last_gc_addr` (initially 0) to decide whether to stop.
+                // `last_gc_addr` (initially the last EMPTY sector) to decide
+                // whether to stop.
                 let last = self.read_sector_info(previous, true)?;
                 if last.check_ok {
                     last.remain
@@ -1485,7 +1506,27 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         let (empty, _) = self.sector_statistics()?;
         if empty <= GC_EMPTY_SEC_THRESHOLD {
             let sec_size = self.storage.sec_size();
-            let mut last_gc_addr = 0u32;
+            // C's `gc_check_cb` records the last EMPTY sector address in scan
+            // order and passes it as `gc->last_gc_sec_addr`. The first do_gc()
+            // stop-check reads *that* sector's remain; starting from 0 instead
+            // makes GC collect extra sectors on the first pass.
+            let mut last_gc_addr = {
+                let mut last_empty = 0u32;
+                let mut a = self.storage.oldest_addr;
+                let mut t = 0u32;
+                loop {
+                    t += sec_size;
+                    let s = self.read_sector_info(a, false)?;
+                    if s.check_ok && s.store == SectorStoreStatus::Empty {
+                        last_empty = a;
+                    }
+                    a = self.next_sector_addr(&s, t);
+                    if a == FAILED_ADDR {
+                        break;
+                    }
+                }
+                last_empty
+            };
             let mut last_gc_remain: Option<u32> = None;
             let mut addr = self.storage.oldest_addr;
             let mut traversed = 0u32;
@@ -1579,6 +1620,17 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         Ok(())
     }
 
+    /// Write caller-provided defaults (only when the partition had to be
+    /// formatted). Kept out of line so mounting a populated database does not
+    /// pull the whole write path's stack frame into `mount`.
+    #[inline(never)]
+    fn write_defaults(&mut self, defaults: &[(&str, &[u8])]) -> Result<(), F::Error> {
+        for (key, value) in defaults {
+            self.set(key.as_bytes(), value)?;
+        }
+        Ok(())
+    }
+
     fn load(&mut self, defaults: &[(&str, &[u8])]) -> Result<(), F::Error> {
         self.in_recovery = true;
         let total = self.storage.sector_count();
@@ -1603,9 +1655,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         if failed == total {
             // Unformatted partition (or all headers destroyed): format once.
             self.format_all()?;
-            for (key, value) in defaults {
-                self.set(key.as_bytes(), value)?;
-            }
+            self.write_defaults(defaults)?;
         } else if failed > 0 {
             // Format only the damaged sectors.
             let mut addr = 0u32;
@@ -1653,10 +1703,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// Erase every sector and write `defaults`.
     pub fn format_with_defaults(&mut self, defaults: &[(&str, &[u8])]) -> Result<(), F::Error> {
         self.format_all()?;
-        for (key, value) in defaults {
-            self.set(key.as_bytes(), value)?;
-        }
-        Ok(())
+        self.write_defaults(defaults)
     }
 
     /// Verify the CRC32 of every committed record.

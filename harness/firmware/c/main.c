@@ -327,6 +327,8 @@ static void stack_diagnostics(struct harness_metrics *m)
     uint8_t iter_buf[HW_KV_VALUE_LEN + 1];
     struct fdb_blob blob;
     struct fdb_kv_iterator itr;
+    struct ts_iter_ctx ctx;
+    uint8_t ts_payload[HW_TS_PAYLOAD_LEN];
     fdb_err_t err;
     size_t got;
     uint32_t n;
@@ -382,6 +384,33 @@ static void stack_diagnostics(struct harness_metrics *m)
         }
     }
     m->st_gc = stack_high_water_bytes();
+
+    /* (f) one TSDB append, (g) full TSDB iteration.  The TS database already
+     *     holds the 200 workload records; the diagnostic append uses the next
+     *     timestamp, so the iteration sees 201 entries. */
+    stack_repaint();
+    make_ts_payload(ts_payload, HW_TS_APPENDS);
+    fdb_blob_make(&blob, ts_payload, sizeof(ts_payload));
+    err = fdb_tsl_append_with_ts(&g_tsdb, &blob,
+                                 (fdb_time_t)(HW_TS_BASE_TIME + HW_TS_APPENDS));
+    if (err != FDB_NO_ERR) {
+        harness_fail("st_ts_append", (int)err);
+    }
+    m->st_ts_append = stack_high_water_bytes();
+
+    stack_repaint();
+    ctx.db = &g_tsdb;
+    ctx.count = 0;
+    ctx.checksum = 0;
+    ctx.bad = 0;
+    fdb_tsl_iter(&g_tsdb, ts_iter_cb, &ctx);
+    if (ctx.bad != 0) {
+        harness_fail("st_ts_iter_read", (int)ctx.bad);
+    }
+    if (ctx.count != HW_TS_APPENDS + 1) {
+        harness_fail("st_ts_iter_count", (int)ctx.count);
+    }
+    m->st_ts_iter = stack_high_water_bytes();
 }
 #endif /* HARNESS_STACK_PHASES */
 

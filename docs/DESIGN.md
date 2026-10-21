@@ -272,3 +272,9 @@ valid data.
   build macro; the resulting format matches the C option.
 * **Write granularities 64/128/256** have layout tables and algorithms, but
   are exercised less than 1/8/32 (the common NOR / STM32 cases).
+* **`FDB_KV_AUTO_UPDATE`** (bump a stored version number and re-apply defaults)
+  is not ported as a built-in option; it is a small policy layer on top of
+  `mount_with_defaults` / `set` and is left to the application.
+* **`fdb_kv_print` / `fdb_tsl_iter` debug printing** is replaced by iterators
+  plus the user's own formatting, and `fdb_kvdb_control` lock hooks are
+  unnecessary because a database is borrowed exclusively (`&mut self`).

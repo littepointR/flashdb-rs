@@ -125,6 +125,10 @@ void harness_print_result(const struct harness_metrics *m)
     sh_write_u32(m->st_iter);
     sh_write0(" st_gc=");
     sh_write_u32(m->st_gc);
+    sh_write0(" st_ts_append=");
+    sh_write_u32(m->st_ts_append);
+    sh_write0(" st_ts_iter=");
+    sh_write_u32(m->st_ts_iter);
 #endif
     sh_write0(" kv_writes=");
     sh_write_u32(m->kv_writes);

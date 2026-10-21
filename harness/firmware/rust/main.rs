@@ -9,10 +9,10 @@
 //!     (64 keys x 24-byte values, 32 updates, 1500 churn rewrites over 16
 //!     keys, 64 verified gets, full iteration).  Partition 16 KiB = 4 x 4 KiB,
 //!     matching the C harness.
-//!   * TSDB: the Rust TSDB API is not integrated yet.  `tsdb_phase_placeholder`
-//!     stands in for it and produces exactly the same 16-byte payload stream
-//!     as the C firmware, so `ts_checksum` is already comparable.  When the
-//!     real TSDB lands, replace that one function (see README.md).
+//!   * TSDB: real crate, workload identical in shape to the C firmware
+//!     (200 x append of a 16-byte deterministic payload with fake timestamps,
+//!     then full forward iteration + checksum).  Separate 16 KiB partition in
+//!     the second half of the `.sim_flash` region; rollover disabled.
 //!
 //! Everything else -- startup assembly, linker script, semihosting, stack
 //! painting, RESULT format, libc shims -- is shared with the C firmware so the
@@ -26,7 +26,7 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
-use flashdb::{Config, Flash, Kvdb};
+use flashdb::{Config, Flash, Kvdb, Tsdb};
 
 // The SAME startup assembly file as the C firmware.  It is plain GNU-syntax
 // ARM assembly, accepted by both arm-none-eabi-gcc and LLVM's integrated
@@ -45,9 +45,13 @@ const KV_VALUE_LEN: usize = 24;
 const TS_APPENDS: u32 = 200;
 const TS_PAYLOAD_LEN: usize = 16;
 const TS_BASE_TIME: u32 = 1000;
+/// Maximum payload accepted by one TSDB append (C harness uses 64; only an
+/// upper-bound validation in the Rust API, the on-flash format is identical).
+const TS_MAX_LEN: u32 = 32;
 
 const SECTOR_SIZE: u32 = 4096;
 const KV_PARTITION_SIZE: u32 = 16 * 1024;
+const TS_PARTITION_SIZE: u32 = 16 * 1024;
 
 const STACK_PAINT_WORD: u32 = 0xA5A5_A5A5;
 
@@ -404,6 +408,10 @@ struct Metrics {
     st_iter: u32,
     #[cfg(feature = "stack-phases")]
     st_gc: u32,
+    #[cfg(feature = "stack-phases")]
+    st_ts_append: u32,
+    #[cfg(feature = "stack-phases")]
+    st_ts_iter: u32,
     kv_writes: u32,
     kv_gets: u32,
     kv_iterated: u32,
@@ -433,6 +441,10 @@ impl Metrics {
             st_iter: 0,
             #[cfg(feature = "stack-phases")]
             st_gc: 0,
+            #[cfg(feature = "stack-phases")]
+            st_ts_append: 0,
+            #[cfg(feature = "stack-phases")]
+            st_ts_iter: 0,
             kv_writes: 0,
             kv_gets: 0,
             kv_iterated: 0,
@@ -508,16 +520,22 @@ fn stack_repaint() {
 /* holds a shallow reference to them.                                       */
 /* ======================================================================== */
 
-/// 16 KiB simulated NOR for the KVDB partition (4 x 4 KiB erase blocks).
+/// One 16 KiB simulated NOR partition (4 x 4 KiB erase blocks).
 ///
-/// It lives in the `.sim_flash` NOLOAD memory region of the linker script --
-/// the same region the C firmware's FAL simulator uses -- so it is neither
-/// part of ROM nor counted in .data/.bss: it models an external NOR part.
+/// Both stores live in the `.sim_flash` NOLOAD memory region of the linker
+/// script (32 KiB total: KV at +0, TS at +16 KiB) -- the same region the C
+/// firmware's FAL simulator uses -- so they are neither part of ROM nor
+/// counted in .data/.bss: they model external NOR parts.
 #[repr(C, align(4096))]
-struct SimFlashStore([u8; KV_PARTITION_SIZE as usize]);
+struct SimFlashStore<const N: usize>([u8; N]);
 
 #[link_section = ".sim_flash"]
-static mut KV_SIM_FLASH: SimFlashStore = SimFlashStore([0u8; KV_PARTITION_SIZE as usize]);
+static mut KV_SIM_FLASH: SimFlashStore<{ KV_PARTITION_SIZE as usize }> =
+    SimFlashStore([0u8; KV_PARTITION_SIZE as usize]);
+
+#[link_section = ".sim_flash"]
+static mut TS_SIM_FLASH: SimFlashStore<{ TS_PARTITION_SIZE as usize }> =
+    SimFlashStore([0u8; TS_PARTITION_SIZE as usize]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimFlashError {
@@ -525,31 +543,42 @@ enum SimFlashError {
     UnalignedErase,
 }
 
-/// Minimal NOR flash driver over [`KV_SIM_FLASH`].
+/// Minimal NOR flash driver over one [`SimFlashStore`] region.
 ///
 /// `flashdb-sim::RamFlash` is the same simulator used by the host benchmarks,
-/// but it owns its 16 KiB buffer by value; in a bare-metal image that buffer
-/// would land in `.data` (16 KiB of ROM!) and in the static-RAM metric.  For
-/// the footprint measurement the buffer must live in the detached `.sim_flash`
-/// region, so the firmware implements the two-dozen-line `Flash` trait here.
-/// The driver is harness code, present in the C image too (fal_ram_sim.c), so
-/// it does not tilt the comparison.
-struct SimFlash;
-
-const SIM_FLASH_LEN: usize = KV_PARTITION_SIZE as usize;
+/// but it owns its buffer by value; in a bare-metal image that buffer would
+/// land in `.data` (16 KiB of ROM!) and in the static-RAM metric.  For the
+/// footprint measurement the buffers must live in the detached `.sim_flash`
+/// region, so the firmware implements the small `Flash` trait here.  One
+/// implementation serves both partitions through a base pointer; the driver is
+/// harness code present in the C image too (fal_ram_sim.c), so it does not tilt
+/// the comparison.
+#[derive(Clone, Copy)]
+struct SimFlash {
+    base: *mut u8,
+    len: usize,
+}
 
 impl SimFlash {
-    fn base() -> *mut u8 {
-        unsafe { core::ptr::addr_of_mut!(KV_SIM_FLASH.0) as *mut u8 }
+    const fn new(base: *mut u8, len: usize) -> Self {
+        Self { base, len }
     }
 
-    fn range(addr: u32, len: usize) -> Result<(usize, usize), SimFlashError> {
+    fn check(&self, addr: u32, len: usize) -> Result<usize, SimFlashError> {
         let start = addr as usize;
         let end = start.checked_add(len).ok_or(SimFlashError::OutOfBounds)?;
-        if end > SIM_FLASH_LEN {
+        if end > self.len {
             return Err(SimFlashError::OutOfBounds);
         }
-        Ok((start, end))
+        Ok(start)
+    }
+
+    /// Put the simulated part into its factory-fresh (erased) state.
+    #[inline(never)]
+    fn erase_all(&self) {
+        unsafe {
+            core::ptr::write_bytes(self.base, 0xFF, self.len);
+        }
     }
 }
 
@@ -560,25 +589,22 @@ impl Flash for SimFlash {
 
     #[inline(never)]
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
-        let (start, _end) = Self::range(addr, buf.len())?;
-        let base = Self::base();
+        let start = self.check(addr, buf.len())?;
         unsafe {
-            core::ptr::copy_nonoverlapping(base.add(start), buf.as_mut_ptr(), buf.len());
+            core::ptr::copy_nonoverlapping(self.base.add(start), buf.as_mut_ptr(), buf.len());
         }
         Ok(())
     }
 
     #[inline(never)]
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), Self::Error> {
-        Self::range(addr, buf.len())?;
-        let base = Self::base();
-        let start = addr as usize;
+        let start = self.check(addr, buf.len())?;
         let mut i = 0;
         while i < buf.len() {
             unsafe {
                 // NOR programming can only clear bits (1 -> 0).
-                let old = core::ptr::read_volatile(base.add(start + i));
-                core::ptr::write_volatile(base.add(start + i), old & buf[i]);
+                let old = core::ptr::read_volatile(self.base.add(start + i));
+                core::ptr::write_volatile(self.base.add(start + i), old & buf[i]);
             }
             i += 1;
         }
@@ -590,37 +616,49 @@ impl Flash for SimFlash {
         if addr % SECTOR_SIZE != 0 || len % SECTOR_SIZE != 0 {
             return Err(SimFlashError::UnalignedErase);
         }
-        Self::range(addr, len as usize)?;
-        let base = Self::base();
+        let start = self.check(addr, len as usize)?;
         unsafe {
-            core::ptr::write_bytes(base.add(addr as usize), 0xFF, len as usize);
+            core::ptr::write_bytes(self.base.add(start), 0xFF, len as usize);
         }
         Ok(())
     }
 }
 
-/// Put the simulated part into its factory-fresh (erased) state.
-#[inline(never)]
-fn sim_flash_erase_all() {
+fn kv_flash() -> SimFlash {
     unsafe {
-        core::ptr::write_bytes(SimFlash::base(), 0xFF, SIM_FLASH_LEN);
+        SimFlash::new(
+            core::ptr::addr_of_mut!(KV_SIM_FLASH.0) as *mut u8,
+            KV_PARTITION_SIZE as usize,
+        )
     }
 }
 
-// The database struct itself lives in .bss, mirroring the C firmware's static
-// fdb_kvdb, so main()'s frame stays shallow and the stack measurement is
-// comparable.
+fn ts_flash() -> SimFlash {
+    unsafe {
+        SimFlash::new(
+            core::ptr::addr_of_mut!(TS_SIM_FLASH.0) as *mut u8,
+            TS_PARTITION_SIZE as usize,
+        )
+    }
+}
+
+// The database structs live in .bss, mirroring the C firmware's static
+// fdb_kvdb/fdb_tsdb, so main()'s frame stays shallow and the stack measurement
+// is comparable.
 type KvDb = Kvdb<SimFlash>;
+type TsDb = Tsdb<SimFlash>;
 
-struct DbCell(UnsafeCell<MaybeUninit<KvDb>>);
-unsafe impl Sync for DbCell {}
+struct DbCell<T>(UnsafeCell<MaybeUninit<T>>);
+unsafe impl<T> Sync for DbCell<T> {}
 
-static KV_DB: DbCell = DbCell(UnsafeCell::new(MaybeUninit::uninit()));
+static KV_DB: DbCell<KvDb> = DbCell(UnsafeCell::new(MaybeUninit::uninit()));
+static TS_DB: DbCell<TsDb> = DbCell(UnsafeCell::new(MaybeUninit::uninit()));
 
 #[inline(never)]
 fn kv_mount() {
-    sim_flash_erase_all();
-    match Kvdb::mount(SimFlash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)) {
+    let flash = kv_flash();
+    flash.erase_all();
+    match Kvdb::mount(flash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)) {
         Ok(db) => unsafe {
             (*KV_DB.0.get()).write(db);
         },
@@ -628,8 +666,27 @@ fn kv_mount() {
     }
 }
 
+#[inline(never)]
+fn ts_mount() {
+    let flash = ts_flash();
+    flash.erase_all();
+    match Tsdb::mount(flash, Config::new(SECTOR_SIZE, TS_PARTITION_SIZE), TS_MAX_LEN) {
+        Ok(mut db) => {
+            db.set_rollover(false);
+            unsafe {
+                (*TS_DB.0.get()).write(db);
+            }
+        }
+        Err(_) => fail(b"ts_mount\0", 0),
+    }
+}
+
 fn kv() -> &'static mut KvDb {
     unsafe { &mut *(*KV_DB.0.get()).as_mut_ptr() }
+}
+
+fn ts() -> &'static mut TsDb {
+    unsafe { &mut *(*TS_DB.0.get()).as_mut_ptr() }
 }
 
 /* ======================================================================== */
@@ -794,38 +851,52 @@ fn kv_phase(m: &mut Metrics) {
 }
 
 /* ======================================================================== */
-/* TSDB phase -- placeholder until the Rust TSDB API is integrated.         */
+/* TSDB phase -- real Rust flashdb crate                                    */
 /*                                                                          */
-/* Produces the same deterministic 16-byte payload stream as the C firmware */
-/* and checksums it in append order, so ts_checksum is directly comparable  */
-/* with the C TSDB result even though no TSDB code is involved yet.         */
-/*                                                                          */
-/* It deliberately keeps NO log storage in RAM: the C TSDB keeps its 200    */
-/* records in the simulated NOR partition, and this placeholder would       */
-/* otherwise add 3.2 KiB of .bss that the C image does not have, polluting  */
-/* the static-RAM comparison.  The payload is a pure function of the append */
-/* index, so the iteration pass simply regenerates it.                     */
+/* 200 deterministic 16-byte payloads with fake timestamps (1000..1199),    */
+/* then a full forward iteration that reads each payload back and checksums */
+/* it in iteration order.  This mirrors the C workload exactly, so         */
+/* ts_checksum is directly comparable.                                      */
 /* ======================================================================== */
 
 #[inline(never)]
-fn tsdb_phase_placeholder(m: &mut Metrics) {
+fn tsdb_phase(m: &mut Metrics) {
+    let db = ts();
     let mut payload = [0u8; TS_PAYLOAD_LEN];
+    let mut read_buf = [0u8; TS_PAYLOAD_LEN];
     let mut i = 0u32;
 
-    // append phase (stands in for fdb_tsl_append_with_ts)
+    // append phase
     while i < TS_APPENDS {
         make_ts_payload(&mut payload, i);
+        if db.append((TS_BASE_TIME + i) as i32, &payload).is_err() {
+            fail(b"ts_append\0", i);
+        }
         m.ts_appends += 1;
         i += 1;
     }
 
-    // iteration phase (stands in for fdb_tsl_iter + fdb_blob_read)
-    i = 0;
-    while i < TS_APPENDS {
-        make_ts_payload(&mut payload, i);
+    // forward iteration phase
+    let mut it = db.iter();
+    let mut n = 0u32;
+    while let Some(entry) = it.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => fail(b"ts_iter\0", n),
+        };
+        let got = match it.read_blob(&entry, &mut read_buf) {
+            Ok(g) => g,
+            Err(_) => fail(b"ts_iter_read\0", n),
+        };
+        if got != TS_PAYLOAD_LEN {
+            fail(b"ts_iter_len\0", got as u32);
+        }
         m.ts_iterated += 1;
-        m.ts_checksum = fnv1a(m.ts_checksum, &payload);
-        i += 1;
+        m.ts_checksum = fnv1a(m.ts_checksum, &read_buf[..got]);
+        n += 1;
+    }
+    if n != TS_APPENDS {
+        fail(b"ts_iter_count\0", n);
     }
 }
 
@@ -899,6 +970,45 @@ fn stack_diagnostics(m: &mut Metrics) {
         n += 1;
     }
     m.st_gc = stack_high_water_bytes();
+
+    // (f) one TSDB append, (g) full TSDB iteration.  The TS database has all
+    //     200 records from the workload at this point; the diagnostic append
+    //     uses the next timestamp so the iteration then sees 201 entries.
+    let tsdb = ts();
+    let mut ts_payload = [0u8; TS_PAYLOAD_LEN];
+    let mut ts_buf = [0u8; TS_PAYLOAD_LEN];
+
+    stack_repaint();
+    make_ts_payload(&mut ts_payload, TS_APPENDS);
+    if tsdb
+        .append((TS_BASE_TIME + TS_APPENDS) as i32, &ts_payload)
+        .is_err()
+    {
+        fail(b"st_ts_append\0", 0);
+    }
+    m.st_ts_append = stack_high_water_bytes();
+
+    stack_repaint();
+    let mut ts_it = tsdb.iter();
+    let mut ts_n = 0u32;
+    while let Some(entry) = ts_it.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => fail(b"st_ts_iter\0", ts_n),
+        };
+        let got = match ts_it.read_blob(&entry, &mut ts_buf) {
+            Ok(g) => g,
+            Err(_) => fail(b"st_ts_iter_read\0", ts_n),
+        };
+        if got != TS_PAYLOAD_LEN {
+            fail(b"st_ts_iter_len\0", got as u32);
+        }
+        ts_n += 1;
+    }
+    if ts_n != TS_APPENDS + 1 {
+        fail(b"st_ts_iter_count\0", ts_n);
+    }
+    m.st_ts_iter = stack_high_water_bytes();
 }
 
 #[inline(never)]
@@ -929,6 +1039,10 @@ fn print_result(m: &Metrics) {
         write_u32(m.st_iter);
         write_bytes(b" st_gc=\0");
         write_u32(m.st_gc);
+        write_bytes(b" st_ts_append=\0");
+        write_u32(m.st_ts_append);
+        write_bytes(b" st_ts_iter=\0");
+        write_u32(m.st_ts_iter);
     }
     write_bytes(b" kv_writes=\0");
     write_u32(m.kv_writes);
@@ -957,12 +1071,13 @@ pub extern "C" fn main() -> ! {
 
     // Database init (compares with the C fdb_kvdb_init/fdb_tsdb_init phase).
     kv_mount();
+    ts_mount();
 
     // High-water reached by initialisation, before the workload starts.
     m.stack_init = stack_high_water_bytes();
 
     kv_phase(&mut m);
-    tsdb_phase_placeholder(&mut m);
+    tsdb_phase(&mut m);
 
     // Final scan after both phases have returned to this shallow frame.
     m.stack = stack_high_water_bytes();
