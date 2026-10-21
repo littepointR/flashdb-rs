@@ -229,7 +229,8 @@ enum IterMode<T: Timestamp> {
     ByTime { from: T, to: T },
 }
 
-/// Per-mode stepping function used by [`TslIterator::next`].
+/// Per-mode stepping function used by [`TslIterator::next`] (compact dispatch).
+#[cfg(not(feature = "fast-iter"))]
 #[allow(type_alias_bounds)] // the bound is needed to name `F::Error`
 type NextFn<'a, F: Flash, T> = for<'b> fn(
     &'b mut TslIterator<'a, F, T>,
@@ -1446,7 +1447,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
         }
     }
 
-    /// Entry point for [`IterMode::ByTime`] iteration.
+    /// Entry point for [`IterMode::ByTime`] iteration (compact dispatch only).
+    #[cfg(not(feature = "fast-iter"))]
     fn next_by_time_entry(&mut self) -> Option<Result<TslEntry<T>, F::Error>> {
         match self.mode {
             IterMode::ByTime { from, to } => self.next_by_time(from, to),

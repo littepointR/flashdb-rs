@@ -228,6 +228,10 @@ pub fn crc32(mut crc: u32, data: &[u8]) -> u32 {
     !crc
 }
 
+/// Calculate a chained CRC32, matching `fdb_calc_crc32(crc, buf, size)`.
+///
+/// Pass `crc = 0` for the first chunk and feed the previous return value for
+/// subsequent chunks. This is the `small-crc` variant (nibble table).
 #[cfg(feature = "small-crc")]
 #[inline]
 pub fn crc32(mut crc: u32, data: &[u8]) -> u32 {

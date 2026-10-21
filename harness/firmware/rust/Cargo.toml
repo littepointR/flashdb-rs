@@ -20,6 +20,10 @@ path = "main.rs"
 # Off by default so the measured baseline image stays lean; scripts/fw_rust.sh
 # --phases builds with this feature for the attribution run.
 stack-phases = []
+# Passthrough of the crate's size-oriented CRC32 (64-byte nibble table instead
+# of the 1 KiB byte table, ~2x CRC CPU).  Used for the optional secondary
+# measurement (`scripts/fw_rust.sh size --small-crc`); default stays untouched.
+small-crc = ["flashdb/small-crc"]
 
 [dependencies]
 # Real Rust rewrite under measurement (no_std, no external dependencies).

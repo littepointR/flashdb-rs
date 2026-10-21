@@ -702,14 +702,20 @@ fn kv_mount() {
 fn ts_mount() {
     let flash = ts_flash();
     flash.erase_all();
-    let mut db = ok_or_fail(
-        Tsdb::mount(flash, Config::new(SECTOR_SIZE, TS_PARTITION_SIZE), TS_MAX_LEN),
+    // Placement initialization (mirrors Kvdb::mount_into): the TSDB struct is
+    // built directly in .bss so mounting costs no stack copy of the database.
+    let slot = unsafe { &mut *TS_DB.0.get() };
+    let _ = ok_or_fail(
+        Tsdb::mount_into(
+            slot,
+            flash,
+            Config::new(SECTOR_SIZE, TS_PARTITION_SIZE),
+            TS_MAX_LEN,
+        ),
         TAG_TS_MOUNT,
     );
+    let db = unsafe { slot.assume_init_mut() };
     db.set_rollover(false);
-    unsafe {
-        (*TS_DB.0.get()).write(db);
-    }
 }
 
 fn kv() -> &'static mut KvDb {

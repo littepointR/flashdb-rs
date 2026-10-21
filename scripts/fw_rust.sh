@@ -17,6 +17,7 @@
 #   scripts/fw_rust.sh size            # "size" profile (opt-level="z", LTO)
 #   scripts/fw_rust.sh --phases        # diagnostic build with per-phase stack peaks
 #   scripts/fw_rust.sh --symbols       # also print symbol-level size attribution
+#   scripts/fw_rust.sh --small-crc     # opt-in crate feature: 64-byte CRC table (-960B rodata)
 #   scripts/fw_rust.sh size --phases --symbols   # flags compose
 #   scripts/fw_rust.sh --build-only    # build + sizes only, no QEMU
 #   scripts/fw_rust.sh --clean         # remove cargo target dir first
@@ -60,7 +61,8 @@ BUILD_ONLY=0
 CLEAN=0
 PHASES=0
 SYMBOLS=0
-FEATURE_ARGS=()
+SMALL_CRC=0
+FEATURES=()
 SUFFIX=""
 for arg in "$@"; do
   case "$arg" in
@@ -69,6 +71,7 @@ for arg in "$@"; do
     --clean) CLEAN=1 ;;
     --phases) PHASES=1 ;;
     --symbols) SYMBOLS=1 ;;
+    --small-crc) SMALL_CRC=1 ;;
     release) PROFILE="release" ;;
     size) PROFILE="size" ;;
     *) die "unknown argument: $arg (try --help)" ;;
@@ -79,8 +82,18 @@ if [ "$PHASES" = "1" ]; then
   # Diagnostic build: per-phase stack-attribution instrumentation.  It is NOT
   # the baseline (extra code changes ROM/stack), and the ELF gets a _phases
   # suffix so the baseline artifact is not overwritten.
-  FEATURE_ARGS=(--features stack-phases)
+  FEATURES+=(stack-phases)
   SUFFIX="_phases"
+fi
+if [ "$SMALL_CRC" = "1" ]; then
+  # Opt-in crate feature: 64-byte nibble CRC table instead of 1 KiB byte table.
+  # Reported as a secondary configuration, never as the default baseline.
+  FEATURES+=(small-crc)
+  SUFFIX="${SUFFIX}_smallcrc"
+fi
+FEATURE_ARGS=()
+if [ "${#FEATURES[@]}" -gt 0 ]; then
+  FEATURE_ARGS=(--features "${FEATURES[@]}")
 fi
 
 command -v "$CARGO" >/dev/null 2>&1 || die "cargo not found: $CARGO (set CARGO=...)"
@@ -114,6 +127,11 @@ echo "   cargo    : $("$CARGO" --version)"
 echo "   target   : $TARGET / Cortex-M3 / MPS2-AN385 (qemu: $QEMU_MACHINE)"
 echo "   crate    : crates/flashdb (real Rust rewrite), crates/flashdb-sim not used"
 echo "              in the firmware image: the RAM NOR driver lives in main.rs"
+if [ "$SMALL_CRC" = "1" ]; then
+  echo "   crc      : small-crc feature (64-byte nibble table, NON-default)"
+else
+  echo "   crc      : default (256-entry byte table)"
+fi
 echo "   output   : $ELF_DIR/fw_rust_${PROFILE}${SUFFIX}.elf"
 echo
 

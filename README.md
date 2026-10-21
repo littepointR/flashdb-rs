@@ -134,12 +134,12 @@ simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS
 
 | metric (Cortex-M3, same workload) | C FlashDB | Rust |
 |---|---:|---:|
-| ROM (`-Os` vs `-z`) | 11 408 B | 14 624 B (13 664 B with `small-crc`; ≈12.1 KiB best nightly size build) |
+| ROM (`-Os` vs `-z`) | 11 408 B | 14 616 B (13 668 B with `small-crc`; ≈13.1 KiB smallest nightly build) |
 | static RAM | 1 064 B | **624 B** |
 | static + stack RAM | 2 256 B | **2 056 B** |
 | KV flash reads (hot get / miss / update / iterate) | 6 000 / 159 / 11.1 / 15.9 per op | **4 / 37 / 8.0 / 6.9** |
 | TS flash reads / writes / erases | identical to C in every scenario | identical |
-| host CPU | baseline | faster in 12/16 scenarios in the default build; all 16 with `--features fast-iter` |
+| host CPU | baseline | faster in 11/16 scenarios in the default build; all 16 with `--features fast-iter` |
 
 All scenarios produce identical logical checksums, and Rust-written and
 C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. ROM is the

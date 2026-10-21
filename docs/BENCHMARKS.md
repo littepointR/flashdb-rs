@@ -95,15 +95,27 @@ in both images, so it counts as neither ROM nor MCU RAM.
 
 | metric | C FlashDB (-Os) | Rust `opt-level="s"` | Rust `opt-level="z"` |
 |---|---:|---:|---:|
-| `.text` | 9 720 B | 14 628 B | 13 104 B |
+| `.text` | 9 720 B | 14 636 B | 13 096 B |
 | `.rodata` | 1 632 B | 1 520 B | 1 520 B |
 | `.data` | 56 B | 0 | 0 |
-| **ROM total** | **11 408 B** | **16 148 B** (+42%) | **14 624 B** (+28%) |
+| **ROM total** | **11 408 B** | **16 156 B** (+42%) | **14 616 B** (+28%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
 | stack high-water | 1 192 B | 1 312 B | 1 432 B |
 | **static + stack RAM** | **2 256 B** | **1 936 B** (−14%) | **2 056 B** (−9%) |
 | workload checksums | KV `0x4b3486a4`, TS `0x10d90680` | identical | identical |
+
+Per-phase stack high-water (diagnostic builds; `--phases`):
+
+| phase | C | Rust `-s` | Rust `-z` |
+|---|---:|---:|---:|
+| mount/init | 752 B | 912 B | 952 B |
+| KV set | 736 B | 952 B | 984 B |
+| KV get | 720 B | 1 056 B | 1 048 B |
+| KV iterate | 560 B | 784 B | 856 B |
+| KV GC churn | 1 248 B | 1 424 B | 1 528 B |
+| TS append | 528 B | 680 B | 728 B |
+| TS iterate | 568 B | 824 B | 840 B |
 
 ### Size/performance options
 
@@ -112,10 +124,11 @@ on-flash format and behaviour identical:
 
 | configuration | ROM (`-z`) | trade-off |
 |---|---:|---|
-| default (compact iterator dispatch, 256-byte CRC table) | 14 624 B | per-entry indirect dispatch in TS iteration; equal to C on real flash, where a flash read dominates |
-| default + `--features small-crc` | ≈13 664 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
-| `--features fast-iter` | ≈15 632 B | direct dispatch; host CPU parity on every scenario |
-| `fast-iter` + `small-crc` + nightly `build-std`/`panic=immediate-abort` | ≈12 100 B | requires a nightly toolchain for `build-std` |
+| default (compact iterator dispatch, 256-byte CRC table) | 14 616 B | per-entry indirect dispatch in TS iteration; equal to C on real flash, where a flash read dominates |
+| default + `--features small-crc` | 13 668 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
+| `--features fast-iter` | ≈15.6 KiB | direct dispatch; host CPU parity on every scenario |
+| `small-crc` + `fast-iter` + nightly `build-std`/`panic=immediate-abort` | ≈14.0 KiB | needs a nightly toolchain for `build-std` |
+| `small-crc` + nightly (compact iterator) | ≈13.1 KiB (+15%) | smallest measured build; nightly toolchain |
 
 ### Interpretation
 
@@ -129,13 +142,13 @@ on-flash format and behaviour identical:
   lookup-heavy scenarios perform 2–5x fewer reads (header/name matching instead
   of CRC-scanning values), and the weighted flash cost
   (read·1 + write·10 + erase·100) is never higher than C's. Host CPU time is
-  also lower in most scenarios; the four TS iteration scenarios are ~1.4–1.6x
-  slower in the default compact build because the zero-latency simulator
+  also lower in most scenarios; the TS iteration/range scenarios are ~1.4–1.6x slower in the default
+  compact build because the zero-latency simulator
   exposes the per-entry dispatch cost that `fast-iter` removes (with
   `fast-iter` all scenarios are at or below C). On real flash a single index
   read costs microseconds, so a ~5 ns/entry difference is noise there.
-* **ROM: still larger than C (+28% in the `-z` size profile; ≈+20% with
-  `small-crc`; ≈+6% in the best nightly size build).** Attribute analysis
+* **ROM: still larger than C (+28% in the `-z` size profile; +20% with
+  `small-crc`; +15% in the smallest measured nightly build).** Attribute analysis
   (`scripts/fw_rust.sh --symbols`) shows this is compiler/runtime overhead, not
   algorithm size: the linked crate is ≈7.2 KiB of symbols plus ≈1.5–2.5 KiB
   LTO-inlined into the harness, C's whole library (KVDB+TSDB+FAL+utils) is
@@ -168,9 +181,9 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | objective | result |
 |---|---|
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 83 tests green |
-| performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 12/16 scenarios, all scenarios with `fast-iter` |
+| performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build; all scenarios with `fast-iter` |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 936 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 14 624 B vs 11 408 B (`-z`); ≈13 664 B with `small-crc`, ≈12.1 KiB best nightly size build |
+| ROM at least C | **not achieved** — 14 616 B vs 11 408 B (`-z`); 13 668 B with `small-crc`, ≈13.1 KiB smallest measured nightly build |
 
 ROM remains the one open objective. Because the default build prioritises
 performance and C compatibility, the size levers above are opt-in; the next

@@ -257,6 +257,12 @@ Build profiles:
 
 * `release`: `opt-level="s"`, `lto=true`, `codegen-units=1`, `panic="abort"`.
 * `size`: `opt-level="z"`, `lto=true` (`./scripts/fw_rust.sh size`).
+* Harness features (off by default, for diagnostics/measurement only):
+  `stack-phases` (`--phases`), and `small-crc` (`--small-crc`, passthrough of
+  the crate's 64-byte nibble CRC table).
+* Both databases use the crate's placement mounts (`Kvdb::mount_into`,
+  `Tsdb::mount_into`), so they are built directly in `.bss` without a stack
+  copy of the database structs.
 * LTO is required for dead-code elimination on stable: rustc does not expose
   per-function sections, so without LTO the whole crate (including the unused
   TSDB module) is kept in one `.text` section and cannot be garbage-collected.
@@ -328,7 +334,9 @@ partition** (KV at `0x00100000`, TS at `0x00104000`; the linker region is
 ```rust
 let flash = ts_flash();                       // SimFlash over TS_SIM_FLASH
 flash.erase_all();                            // factory-fresh NOR
-let mut db = Tsdb::mount(flash, Config::new(4096, 16384), 32)?;
+let mut slot = MaybeUninit::<Tsdb<_>>::uninit();
+Tsdb::mount_into(&mut slot, flash, Config::new(4096, 16384), 32)?;
+let db = unsafe { slot.assume_init_mut() };
 db.set_rollover(false);
 // 200 x append(1000 + i, 16-byte deterministic payload)
 // then forward iteration + read_blob + checksum
@@ -349,48 +357,76 @@ boot, exactly like the C firmware's first-boot path.
 
 ## Measurement results
 
-Environment: macOS arm64, QEMU 11.0.0, `mps2-an385`. C: `./scripts/fw_c.sh`.
-Rust: `./scripts/fw_rust.sh` (release = `opt-level="s"`) and
-`./scripts/fw_rust.sh size` (`opt-level="z"`). Same crate revision for all
-three rows; crate files were being edited concurrently, so re-run after
-crate changes (numbers can move by a few tens of bytes).
+**Frozen crate revision:** `27c8e6b` (HEAD at the time of measurement).
+**Harness:** this working tree (TS placement mount + `--small-crc` passthrough;
+no crate changes). Host: macOS arm64, QEMU 11.0.0, `mps2-an385`,
+`arm-none-eabi-gcc` 16.1.0 / binutils 2.46, rustc 1.96.1.
 
-The Rust workload is **KVDB + TSDB**, matching the C workload exactly.
-Cross-implementation checksums are identical (`kv_checksum 0x4b3486a4`,
-`kv_iter_checksum 0x0e250daa`, `ts_checksum 0x10d90680`).
+Commands: `./scripts/fw_c.sh [--phases]`, `./scripts/fw_rust.sh [size]
+[--phases] [--symbols] [--small-crc]`. All numbers below are whole-image
+sections from `arm-none-eabi-size -A`, cross-checked against the linker-symbol
+values in the `RESULT` line. `sim_flash` (32 KiB simulated external NOR) is
+never counted as ROM or MCU RAM.
 
-### Headline ROM / RAM / stack (KVDB + TSDB)
+**Configuration labels**
 
-| metric | C FlashDB | Rust release (`s`) | Rust size (`z`) |
+* **C**: upstream FlashDB + FAL, `-Os`, `FDB_WRITE_GRAN=8`, logging compiled
+  out, 16 KiB KV + 16 KiB TS partitions.
+* **Rust `-s`**: `opt-level="s"` + fat LTO, default crate features (256-entry
+  CRC table), same workload/partitions.
+* **Rust `-z`**: `opt-level="z"` + fat LTO, default crate features.
+* **Rust `-s`/`-z` + `small-crc`**: optional crate feature (64-byte nibble
+  CRC table, ~2× CRC CPU); secondary measurement only.
+* `--phases`/`stack-phases` is a **diagnostic-only** build and never used for
+  the headline ROM/RAM numbers.
+
+### Headline: ROM, static RAM, stack (default config)
+
+| metric | C (FlashDB+FAL, `-Os`) | Rust `-s` (default) | Rust `-z` (default) |
 |---|---|---|---|
-| `.text` | 9720 | 15728 | 14220 |
+| `.text` | 9720 | 14636 | 13096 |
 | `.rodata` | 1632 | 1520 | 1520 |
 | `.data` | 56 | 0 | 0 |
-| ROM total | **11408** | **17248** | **15740** |
+| **ROM total** (`text+rodata+data`) | **11408** | **16156** | **14616** |
 | `.bss` | 1008 | 624 | 624 |
-| static RAM | **1064** | **624** | **624** |
-| simulated NOR (excluded) | 32768 | 32768 | 32768 |
-| stack high-water | **1192** | **1312** | **1432** |
-| static+stack RAM | **2256** | **1936** | **2056** |
+| **static RAM** (`data+bss`) | **1064** | **624** | **624** |
+| **stack high-water** | **1192** | **1312** | **1432** |
+| **total RAM** (static+stack) | **2256** | **1936** | **2056** |
+| stack after init (= mount phase) | 696 | 880 | 928 |
 | stack limit | 8192 | 8192 | 8192 |
-| KV writes / gets / iterated | 1596 / 64 / 64 | same | same |
-| KV checksum | `0x4b3486a4` | `0x4b3486a4` | `0x4b3486a4` |
-| KV iteration checksum | `0x0e250daa` | `0x0e250daa` | `0x0e250daa` |
-| TS appends / iterated | 200 / 200 | 200 / 200 | 200 / 200 |
-| TS checksum | `0x10d90680` | `0x10d90680` | `0x10d90680` |
+| simulated NOR (excluded) | 32768 | 32768 | 32768 |
+| KV checksum / iter checksum | `0x4b3486a4` / `0x0e250daa` | same | same |
+| TS checksum | `0x10d90680` | same | same |
 
-Diagnostic (`--phases`) builds are larger by construction and are not part of
-the comparison: C ROM 12032, Rust release ROM 19112, Rust size ROM 17416.
+Rust static RAM is 440 B lower than C; the release (`-s`) profile now has
+lower total RAM than C (1936 vs 2256 B). ROM is still 4.7 KiB (`-s`) /
+3.2 KiB (`-z`) above C; see the attribution section.
 
-> Snapshot note: this table is from the current `crates/flashdb` working tree
-> during the parallel crate optimisation pass (the crate was still being
-> edited and was briefly uncompilable mid-edit; the harness itself is
-> unchanged by that). Refresh with `./scripts/fw_rust.sh` after the crate work
-> lands — the harness code is final for this round.
+### Secondary: `small-crc` feature (optional, non-default)
 
-### Per-phase stack (bytes, `--phases` builds)
+| metric | Rust `-s` + small-crc | Rust `-z` + small-crc |
+|---|---|---|
+| `.text` | 14780 | 13108 |
+| `.rodata` | **560** | **560** |
+| **ROM total** | **15340** | **13668** |
+| `.bss` / static RAM | 624 / 624 | 624 / 624 |
+| stack high-water | 1312 | 1432 |
+| total RAM | 1936 | 2056 |
 
-| phase | C | Rust release | Rust size |
+`small-crc` saves 816 B (`-s`) / 948 B (`-z`) of ROM versus the default, at
+~2× CRC32 CPU cost; stack/RAM are unchanged and all checksums stay identical.
+
+**Caveat:** at `27c8e6b` the `small-crc` crate feature does **not compile** as
+shipped: the feature-gated `pub fn crc32` in `crates/flashdb/src/low.rs:233`
+has no doc comment and the crate has `#![deny(missing_docs)]`. The numbers
+above were measured after adding that one-line doc comment to a temporary copy
+of the crate (no code change); the default (non-small-crc) build is
+unaffected. One-line crate fix needed if the feature should be usable:
+`/// ...` above that function.
+
+### Per-phase stack (`--phases` builds)
+
+| phase | C | Rust `-s` | Rust `-z` |
 |---|---|---|---|
 | mount/init (`stack_init`) | 752 | 912 | 952 |
 | one KV set | 736 | 952 | 984 |
@@ -398,68 +434,54 @@ the comparison: C ROM 12032, Rust release ROM 19112, Rust size ROM 17416.
 | full KV iteration | 560 | 784 | 856 |
 | KV GC churn (1500 writes) | 1248 | 1424 | 1528 |
 | one TS append | 528 | 680 | 728 |
-| full TS iteration | 568 | 792 | 800 |
-| headline `stack` (max) | 1192 | 1400 | 1504 |
+| full TS iteration | 568 | 824 | 840 |
+| headline `stack` (max) | 1192 | 1312 | 1432 |
 
-Reading: C peaks in GC churn (1,248 B); Rust peaks in the diagnostic run's GC
-churn too (1,400–1,528 B); per-operation phases are 100–300 B deeper in Rust.
-The headline `stack` values above (1,312 B release / 1,432 B size) come from
-the non-diagnostic build. Per-phase numbers include each firmware's diagnostic
-frame (~100–300 B, present on both sides), so compare the deltas.
+Diagnostic-build ROM (not comparable to the headline):
+C 12032, Rust `-s` 18080, Rust `-z` 16284.
+Per-phase numbers include each firmware's diagnostic frame (~100–300 B,
+present on both sides); compare deltas, not absolutes. The headline stack
+values (1312/1432 B) come from the non-diagnostic build.
 
-### ROM attribution (bucketed code symbols)
+### ROM attribution (bucketed code symbols, `--symbols`)
 
-| bucket | C | Rust release (`s`) | Rust size (`z`) |
+| bucket | C | Rust `-s` | Rust `-z` |
 |---|---|---|---|
-| library code | 7674 (FlashDB/FAL, KV+TS) | ~7.4 KiB (flashdb, KV+TS) | 7396 (flashdb, KV+TS) |
-| harness code | 2030 | ~6.6 KiB¹ | 6364¹ |
-| core/panic + outliner stubs | – | ~0.4 KiB | 408 |
-| toolchain mem helpers | – (inside harness/libgcc) | 138 | 138 |
-| `.text` (size -A) | 9720 | 15728 | 14220 |
+| library code | 7674 (FlashDB/FAL, KV+TS) | 9038 (flashdb, KV+TS) | 7272 (flashdb, KV+TS) |
+| harness code | 2030 | 5530¹ | 5324¹ |
+| core/panic + outliner stubs | – | 22 | 450 |
+| toolchain mem helpers | (inside harness/libgcc) | 138 | 138 |
+| `.text` (size -A) | 9720 | 14636 | 13096 |
 
-¹ inflated by crate code that LTO inlined into the harness's phase wrappers
-(`tsdb_phase` ~1.8 KiB, `ts_mount` ~1.2 KiB, `kv_mount` ~1.0 KiB include the
-crate mount/append bodies). An opaque-call-boundary experiment puts the
-genuine harness code at ~3.9 KiB: harness bucket 6,456 → 3,880 B while crate
-goes 7,396 → 10,434 B and total ROM grows by 476 B. So roughly 2.5 KiB of the
-"harness" column is crate code awaiting crate-side de-inlining, and the
-remaining ~3.9 KiB is the real harness floor (workload verification, error
-plumbing, print path, NOR driver, startup).
+¹ includes crate mount/append bodies inlined by LTO into the harness wrappers
+(`kv_mount`, `ts_mount`, `kv_put`, `tsdb_phase`). The bucket is therefore an
+upper bound on harness code; crate-side `#[inline(never)]` work reduces it
+without harness changes.
 
-### What is harness-side vs crate-side (KV+TS baseline)
+### What is harness-side vs crate-side (frozen `27c8e6b`)
 
-Harness-side work is unchanged from the KV-only measurements above
-(mem overrides, minimal panic, out-of-line driver, feature-gated diagnostics,
-`#[inline(never)]` phase boundaries). The remaining gap is crate-side:
-
-* **Crate vs C library.** After the crate optimisation pass so far, the named
-  crate symbols (7,396 B, KV+TS) are *below* C's FlashDB/FAL library symbols
-  (7,674 B), but ~2.5 KiB of crate mount/append code is accounted to the
-  harness bucket because LTO inlines it into the harness wrappers. The total
-  ROM gap is therefore mostly (a) that inlined crate code + genuine Rust
-  harness (~3.9 KiB) versus C's 2.0 KiB harness, plus (b) Rust runtime
-  baseline (`core`/panic/slice helpers/outliner ~0.4 KiB).
-* **Stack** is now much closer (release 1,312 B vs C 1,192 B; the KVDB
-  placement API `Kvdb::mount_into` removed the mount by-value copy). Remaining
-  per-phase deltas are 100–300 B and come from crate call depth.
-* **Stack**: Rust mount ≈2,040 B vs C 752 B; per-op phases +150–350 B. The
-  crate `mount` frames (KV and TS) dominate; candidate causes are the
-  per-call scratch buffers and the inlined write paths. Crate-side
-  de-inlining/exact-size buffers should address this.
-* **Rust runtime baseline** ~0.4–0.5 KiB (panic trampolines, slice helpers,
-  outliner stubs) inherent to `no_std` Rust + LTO.
-* **Harness residual** after subtracting inlined crate code is a few hundred
-  bytes (workload verification, print path, NOR driver) and is symmetrically
-  present in the C image; shrinking it further would remove the checks that
-  make the harness trustworthy.
+* **Static RAM**: Rust wins clearly (624 vs 1064 B static; `Tsdb` is 56 B,
+  KVDB uses a compact placement mount) and total RAM is 320 B lower than C at
+  `-s` (1936 vs 2256), 200 B lower at `-z`.
+* **Stack**: Rust `-s` is 120 B above C (1312 vs 1192); the mount phase is
+  880 vs 696 B. This is crate call depth (mount/GC paths), not harness
+  scaffolding.
+* **ROM**: Rust is 4748 B (`-s`) / 3208 B (`-z`) above C. Attribution: crate
+  named code is 9038 B (`-s`) vs C's 7674 B library, and the harness bucket
+  (5530 B) still contains inlined crate mount/append bodies. Rust runtime
+  baseline is small at `-s` (22 B core/panic) but 450 B at `-z` (outliner +
+  slice helpers). C's harness is 2030 B; the genuine Rust harness is larger
+  due to bounds-checked safe code, error plumbing and the workload's
+  verification/checksums.
+* `small-crc` is the cheapest remaining ROM lever (816–948 B) if a slower
+  CRC32 is acceptable.
 
 ### Reproducibility
 
-C compilation is reproducible byte for byte. Rust LTO/codegen layout can vary
-by a few tens of bytes of `.text` and ~1 % of stack between rebuilds
-(checksums and section classes do not change). `crates/flashdb` is being
-edited concurrently; the numbers above correspond to one crate revision —
-re-run both scripts after crate changes.
+C compilation is byte-for-byte reproducible. Rust LTO/codegen layout can vary
+by a few tens of bytes of `.text` between rebuilds (checksums and section
+classes do not change). The tables are from clean `--clean` builds against the
+frozen crate revision above; re-run both scripts after any crate change.
 
 ---
 
