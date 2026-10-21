@@ -127,8 +127,7 @@ on-flash format and behaviour identical:
 | default (compact iterator dispatch, 256-byte CRC table) | 14 616 B | per-entry indirect dispatch in TS iteration; equal to C on real flash, where a flash read dominates |
 | default + `--features small-crc` | 13 668 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
 | `--features fast-iter` | ≈15.6 KiB | direct dispatch; host CPU parity on every scenario |
-| `small-crc` + `fast-iter` + nightly `build-std`/`panic=immediate-abort` | ≈14.0 KiB | needs a nightly toolchain for `build-std` |
-| `small-crc` + nightly (compact iterator) | ≈13.1 KiB (+15%) | smallest measured build; nightly toolchain |
+| `small-crc` + nightly `build-std` (compact iterator) | ≈13.1 KiB | measured on an earlier tree; not reproduced on the frozen commit (nightly toolchain) |
 
 ### Interpretation
 
@@ -148,7 +147,7 @@ on-flash format and behaviour identical:
   `fast-iter` all scenarios are at or below C). On real flash a single index
   read costs microseconds, so a ~5 ns/entry difference is noise there.
 * **ROM: still larger than C (+28% in the `-z` size profile; +20% with
-  `small-crc`; +15% in the smallest measured nightly build).** Attribute analysis
+  `small-crc`).** Attribute analysis
   (`scripts/fw_rust.sh --symbols`) shows this is compiler/runtime overhead, not
   algorithm size: the linked crate is ≈7.2 KiB of symbols plus ≈1.5–2.5 KiB
   LTO-inlined into the harness, C's whole library (KVDB+TSDB+FAL+utils) is
@@ -183,7 +182,7 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 83 tests green |
 | performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build; all scenarios with `fast-iter` |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 936 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 14 616 B vs 11 408 B (`-z`); 13 668 B with `small-crc`, ≈13.1 KiB smallest measured nightly build |
+| ROM at least C | **not achieved** — 14 616 B vs 11 408 B (`-z`); 13 668 B with `small-crc` |
 
 ROM remains the one open objective. Because the default build prioritises
 performance and C compatibility, the size levers above are opt-in; the next
