@@ -121,7 +121,11 @@ fn read_raw_sector_header<F: Flash>(
 ) -> Result<RawSectorHeader, F::Error> {
     let wg = F::WRITE_GRAN_BITS;
     let raw = lay.sec_raw_size as usize;
-    if wg <= 32 {
+    if wg <= 8 {
+        let mut b = [0u8; 20];
+        storage.read(addr, &mut b[..raw])?;
+        Ok(decode_sector_header(&b[..raw], lay, wg))
+    } else if wg <= 32 {
         let mut b = [0u8; 36];
         storage.read(addr, &mut b[..raw])?;
         Ok(decode_sector_header(&b[..raw], lay, wg))
@@ -172,7 +176,12 @@ fn write_formatted_sector_header<F: Flash>(
 ) -> Result<(), F::Error> {
     let wg = F::WRITE_GRAN_BITS;
     let mut scratch = [0u8; 32];
-    if wg <= 32 {
+    if wg <= 8 {
+        let mut b = [0xFFu8; 20];
+        let raw = lay.sec_raw_size as usize;
+        fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
+        storage.write(addr, &b[..raw])
+    } else if wg <= 32 {
         let mut b = [0xFFu8; 36];
         let raw = lay.sec_raw_size as usize;
         fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
@@ -217,7 +226,11 @@ fn read_raw_kv_header<F: Flash>(
 ) -> Result<RawKvHeader, F::Error> {
     let wg = F::WRITE_GRAN_BITS;
     let raw = lay.kv_raw_size as usize;
-    if wg <= 32 {
+    if wg <= 8 {
+        let mut b = [0u8; 28];
+        storage.read(addr, &mut b[..raw])?;
+        Ok(decode_kv_header_raw(&b[..raw], lay, wg))
+    } else if wg <= 32 {
         let mut b = [0u8; 40];
         storage.read(addr, &mut b[..raw])?;
         Ok(decode_kv_header_raw(&b[..raw], lay, wg))
@@ -271,7 +284,11 @@ fn write_raw_kv_header<F: Flash>(
     let wg = F::WRITE_GRAN_BITS;
     let raw = lay.kv_raw_size as usize;
     let mo = lay.kv_magic_off as usize;
-    if wg <= 32 {
+    if wg <= 8 {
+        let mut b = [0xFFu8; 28];
+        fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
+        storage.write(addr + mo as u32, &b[mo..raw])
+    } else if wg <= 32 {
         let mut b = [0xFFu8; 40];
         fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
         storage.write(addr + mo as u32, &b[mo..raw])
@@ -1030,7 +1047,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         {
             return Ok(self.cur_sec.empty_kv);
         }
-        let (empty, using) = self.sector_statistics()?;
+        let (empty, using, _) = self.sector_statistics()?;
         if using > 0 {
             if let Some(sec) = self.find_alloc_candidate(SectorStoreStatus::Using, kv_size)? {
                 self.cur_sec = sec;
@@ -1080,10 +1097,13 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         Ok(None)
     }
 
-    fn sector_statistics(&mut self) -> Result<(u32, u32), F::Error> {
+    /// Count EMPTY/USING sectors. Also returns the address of the last EMPTY
+    /// sector in scan order, which GC needs for C's stop-check heuristic.
+    fn sector_statistics(&mut self) -> Result<(u32, u32, u32), F::Error> {
         let sec_size = self.storage.sec_size();
         let mut empty = 0u32;
         let mut using = 0u32;
+        let mut last_empty = 0u32;
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
@@ -1091,7 +1111,10 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             let sec = self.read_sector_info(addr, false)?;
             if sec.check_ok {
                 match sec.store {
-                    SectorStoreStatus::Empty => empty += 1,
+                    SectorStoreStatus::Empty => {
+                        empty += 1;
+                        last_empty = sec.addr;
+                    }
                     SectorStoreStatus::Using => using += 1,
                     _ => {}
                 }
@@ -1101,7 +1124,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 break;
             }
         }
-        Ok((empty, using))
+        Ok((empty, using, last_empty))
     }
 
     /// Move a sector's store status forward; returns whether the sector became
@@ -1564,30 +1587,13 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     }
 
     fn gc_collect_by_free_size(&mut self, free_size: u32) -> Result<(), F::Error> {
-        let (empty, _) = self.sector_statistics()?;
+        let (empty, _, last_empty) = self.sector_statistics()?;
         if empty <= GC_EMPTY_SEC_THRESHOLD {
             let sec_size = self.storage.sec_size();
             // C's `gc_check_cb` records the last EMPTY sector address in scan
             // order and passes it as `gc->last_gc_sec_addr`. The first do_gc()
-            // stop-check reads *that* sector's remain; starting from 0 instead
-            // makes GC collect extra sectors on the first pass.
-            let mut last_gc_addr = {
-                let mut last_empty = 0u32;
-                let mut a = self.storage.oldest_addr;
-                let mut t = 0u32;
-                loop {
-                    t += sec_size;
-                    let s = self.read_sector_info(a, false)?;
-                    if s.check_ok && s.store == SectorStoreStatus::Empty {
-                        last_empty = a;
-                    }
-                    a = self.next_sector_addr(&s, t);
-                    if a == FAILED_ADDR {
-                        break;
-                    }
-                }
-                last_empty
-            };
+            // stop-check reads *that* sector's remain.
+            let mut last_gc_addr = last_empty;
             let mut last_gc_remain: Option<u32> = None;
             let mut addr = self.storage.oldest_addr;
             let mut traversed = 0u32;

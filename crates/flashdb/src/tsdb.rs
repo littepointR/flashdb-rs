@@ -99,22 +99,22 @@ pub trait Timestamp: Copy + Ord + core::fmt::Debug + Default {
 impl Timestamp for i32 {
     const WIDTH: u32 = 32;
 
-    #[inline]
+    #[inline(always)]
     fn to_i64(self) -> i64 {
         self as i64
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_i64(value: i64) -> Self {
         value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_le(self, buf: &mut [u8], off: usize) {
         buf[off..off + 4].copy_from_slice(&self.to_le_bytes());
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_le(buf: &[u8], off: usize) -> Self {
         i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
     }
@@ -123,22 +123,22 @@ impl Timestamp for i32 {
 impl Timestamp for i64 {
     const WIDTH: u32 = 64;
 
-    #[inline]
+    #[inline(always)]
     fn to_i64(self) -> i64 {
         self
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_i64(value: i64) -> Self {
         value
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_le(self, buf: &mut [u8], off: usize) {
         buf[off..off + 8].copy_from_slice(&self.to_le_bytes());
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_le(buf: &[u8], off: usize) -> Self {
         let mut b = [0u8; 8];
         b.copy_from_slice(&buf[off..off + 8]);
@@ -210,7 +210,6 @@ pub struct TsdbImpl<F: Flash, T: Timestamp> {
     last_time: T,
     max_len: u32,
     rollover: bool,
-    layout: TsLayout,
 }
 
 /// Time-series database with the default 32-bit FlashDB timestamp format.
@@ -464,22 +463,82 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// which this API does not expose yet).
     pub fn mount(flash: F, config: Config, max_len: u32) -> Result<Self, F::Error> {
         let storage = Storage::new(flash, config)?;
-        let layout = ts_layout::<F, T>().ok_or(Error::UnsupportedWriteGran)?;
-        let sec_size = storage.sec_size();
-        let max_size = storage.max_size();
-        if max_len >= sec_size {
-            /* FlashDB asserts max_len < sec_size. */
-            return Err(Error::InvalidConfig);
-        }
-
         let mut db = Self {
             storage,
             cur_sec: SecInfo::default(),
             last_time: T::default(),
             max_len,
             rollover: true,
-            layout,
         };
+        db.mount_inner()?;
+        Ok(db)
+    }
+
+    /// Placement form of [`TsdbImpl::mount`]: initialize `slot` in place.
+    ///
+    /// This lets a database live in a `static` without ever building a whole
+    /// `TsdbImpl` on the stack (FlashDB-C's `fdb_tsdb_init` takes a pointer in
+    /// the same way). On success `slot` is fully initialized; on error the
+    /// slot must not be used (mirrors `KvdbImpl::mount_with_defaults_into`).
+    ///
+    /// ```
+    /// # use flashdb::{Config, Flash, Tsdb};
+    /// # fn demo<F: Flash>(flash: F) -> Result<(), flashdb::Error<F::Error>> {
+    /// let mut slot = core::mem::MaybeUninit::<Tsdb<F>>::uninit();
+    /// Tsdb::mount_into(&mut slot, flash, Config::new(4096, 16384), 256)?;
+    /// // SAFETY: mount_into succeeded, so `slot` is initialized.
+    /// let db = unsafe { slot.assume_init_mut() };
+    /// db.append(1000, b"hello")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(unsafe_code)]
+    pub fn mount_into(
+        slot: &mut core::mem::MaybeUninit<Self>,
+        flash: F,
+        config: Config,
+        max_len: u32,
+    ) -> Result<(), F::Error> {
+        let storage = Storage::new(flash, config)?;
+        // SAFETY: `slot` is valid, aligned, writable memory for `Self` and no
+        // reference to the (not yet initialized) value is created: every field
+        // is initialized exactly once through `addr_of_mut!` and `.write()`.
+        // `assume_init_mut` is only called after all fields are initialized.
+        let db = unsafe {
+            let p = slot.as_mut_ptr();
+            core::ptr::addr_of_mut!((*p).storage).write(storage);
+            core::ptr::addr_of_mut!((*p).cur_sec).write(SecInfo::default());
+            core::ptr::addr_of_mut!((*p).last_time).write(T::default());
+            core::ptr::addr_of_mut!((*p).max_len).write(max_len);
+            core::ptr::addr_of_mut!((*p).rollover).write(true);
+            slot.assume_init_mut()
+        };
+        db.mount_inner()
+    }
+
+    /// On-flash layout for this database, resolved from the compile-time flash
+    /// write granularity and timestamp width (`FDB_WRITE_GRAN`,
+    /// `FDB_USING_TIMESTAMP_64BIT`) so that all field offsets fold to constants.
+    #[inline(always)]
+    fn lay(&self) -> TsLayout {
+        match ts_layout::<F, T>() {
+            Some(layout) => layout,
+            None => unreachable!(),
+        }
+    }
+
+    /// Shared mount/recovery logic used by [`TsdbImpl::mount`] and
+    /// [`TsdbImpl::mount_into`] (`fdb_tsdb_init`).
+    fn mount_inner(&mut self) -> Result<(), F::Error> {
+        if ts_layout::<F, T>().is_none() {
+            return Err(Error::UnsupportedWriteGran);
+        }
+        let sec_size = self.storage.sec_size();
+        let max_size = self.storage.max_size();
+        if self.max_len >= sec_size {
+            /* FlashDB asserts max_len < sec_size. */
+            return Err(Error::InvalidConfig);
+        }
 
         /* Check all sector headers (fdb_tsdb_init + check_sec_hdr_cb). */
         let mut check_failed = false;
@@ -503,8 +562,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             traversed_len = traversed_len.saturating_add(sec_size);
             /* sector_iterator() reads the header once with traversal=false and
              * once more (with traversal) when the status filter matches. */
-            let _ = db.read_sector_info(addr, false)?;
-            let sec = db.read_sector_info(addr, true)?;
+            let _ = self.read_sector_info(addr, false)?;
+            let sec = self.read_sector_info(addr, true)?;
             if sec.addr == max_size - sec_size {
                 last_sector_info = sec;
             }
@@ -512,8 +571,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
                 check_failed = true;
                 break;
             } else if sec.status == SectorStoreStatus::Using {
-                if db.cur_sec.addr == FAILED_ADDR {
-                    db.cur_sec = sec;
+                if self.cur_sec.addr == FAILED_ADDR {
+                    self.cur_sec = sec;
                 } else {
                     /* multiple sectors are in use: the DB is damaged */
                     check_failed = true;
@@ -522,15 +581,15 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             } else if sec.status == SectorStoreStatus::Empty {
                 empty_num += 1;
                 empty_addr = sec.addr;
-                if empty_num == 1 && db.cur_sec.addr == FAILED_ADDR {
-                    db.cur_sec = sec;
+                if empty_num == 1 && self.cur_sec.addr == FAILED_ADDR {
+                    self.cur_sec = sec;
                 }
             } else if sec.status == SectorStoreStatus::Full && sec.end_time > latest_full_time {
                 latest_full_time = sec.end_time;
                 latest_full_addr = sec.addr;
                 latest_full_info = sec;
             }
-            if db.cur_sec.addr == sec.addr {
+            if self.cur_sec.addr == sec.addr {
                 cur_sector_info = sec;
             }
             match next_sector_addr(sec.addr, traversed_len, sec_size, max_size) {
@@ -541,13 +600,13 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
 
         if check_failed {
             /* Headers are damaged: re-format the whole database. */
-            db.format_all()?;
+            self.format_all()?;
             /* fdb_tsdb_init reads the current sector once more after formatting. */
-            db.cur_sec = db.read_sector_info(0, true)?;
+            self.cur_sec = self.read_sector_info(0, true)?;
         } else {
             let latest_addr = if empty_num > 0 {
                 empty_addr
-            } else if db.cur_sec.addr == FAILED_ADDR {
+            } else if self.cur_sec.addr == FAILED_ADDR {
                 /* Every sector is full (rollover disabled, or a power failure
                  * right at the wrap). C reads an invalid current sector here.
                  * Use the sector with the newest end info, falling back to the
@@ -557,24 +616,24 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
                 } else {
                     max_size - sec_size
                 };
-                db.cur_sec.addr = addr;
+                self.cur_sec.addr = addr;
                 addr
-            } else if db.rollover {
-                db.cur_sec.addr
+            } else if self.rollover {
+                self.cur_sec.addr
             } else {
                 /* There is no empty sector. */
                 let addr = max_size - sec_size;
-                db.cur_sec.addr = addr;
+                self.cur_sec.addr = addr;
                 addr
             };
             /* db->cur_sec is the latest sector, the next one is the oldest. */
-            db.storage.oldest_addr = if latest_addr + sec_size >= max_size {
+            self.storage.oldest_addr = if latest_addr + sec_size >= max_size {
                 0
             } else {
                 latest_addr + sec_size
             };
 
-            let cur_addr = db.cur_sec.addr;
+            let cur_addr = self.cur_sec.addr;
             /* Reuse the header already decoded by the check loop (see above). */
             let cached = if cur_addr == max_size - sec_size {
                 Some(last_sector_info)
@@ -585,38 +644,39 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             } else {
                 None
             };
-            db.cur_sec = match cached {
+            self.cur_sec = match cached {
                 Some(sec) => sec,
-                None => db.read_sector_info(cur_addr, true)?,
+                None => self.read_sector_info(cur_addr, true)?,
             };
             /* Recover the last saved timestamp (fdb_tsdb_init). */
-            match db.cur_sec.status {
+            match self.cur_sec.status {
                 SectorStoreStatus::Using => {
-                    db.last_time = db.cur_sec.end_time;
-                    if db.last_time == T::default() {
+                    self.last_time = self.cur_sec.end_time;
+                    if self.last_time == T::default() {
                         /* Power loss right after the sector was opened: there
                          * is no committed record in it, so take the end
                          * timestamp of the previous (sealed) sector. C reads an
                          * uninitialized end_time in this situation. */
-                        db.last_time = db.read_previous_sector_end(cur_addr)?;
+                        self.last_time = self.read_previous_sector_end(cur_addr)?;
                     }
                 }
                 SectorStoreStatus::Full => {
                     /* Every sector is full (rollover disabled). C leaves
                      * last_time at 0 here; the end info is available, so use
                      * it instead of reporting a meaningless timestamp. */
-                    db.last_time = db.cur_sec.end_time;
+                    self.last_time = self.cur_sec.end_time;
                 }
                 SectorStoreStatus::Empty => {
-                    if db.storage.oldest_addr != db.cur_sec.addr {
-                        db.last_time = db.read_previous_sector_end(cur_addr)?;
+                    if self.storage.oldest_addr != self.cur_sec.addr {
+                        self.last_time = self.read_previous_sector_end(cur_addr)?;
                     }
                 }
                 SectorStoreStatus::Unused => {}
             }
         }
 
-        Ok(db)
+
+        Ok(())
     }
 
     /// Append a log entry with an explicit timestamp.
@@ -639,7 +699,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         self.write_tsl(time, data)?;
 
         /* recalculate the current using sector info */
-        let log_idx_size = self.layout.log_idx_size;
+        let log_idx_size = self.lay().log_idx_size;
         let aligned = wg_align(data.len(), F::WRITE_GRAN_BITS) as u32;
         let cur = &mut self.cur_sec;
         cur.end_idx = cur.empty_idx;
@@ -732,8 +792,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// Maximum number of `max_len` payloads the database can hold.
     pub fn max_blob_count(&self) -> usize {
         let sec_size = self.storage.sec_size() as usize;
-        let sec_hdr_size = self.layout.sec_hdr_size as usize;
-        let blob_size = self.layout.log_idx_size as usize
+        let sec_hdr_size = self.lay().sec_hdr_size as usize;
+        let blob_size = self.lay().log_idx_size as usize
             + wg_align(self.max_len as usize, F::WRITE_GRAN_BITS);
         let n_sec = self.storage.sector_count() as usize;
         n_sec * (sec_size.saturating_sub(sec_hdr_size) / blob_size)
@@ -1151,8 +1211,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         from: T,
         to: T,
     ) -> Result<u32, F::Error> {
-        let log_idx_size = self.layout.log_idx_size;
-        let raw_size = self.layout.log_idx_raw_size;
+        let log_idx_size = self.lay().log_idx_size;
+        let raw_size = self.lay().log_idx_raw_size;
         let last = sector_end.saturating_sub(raw_size);
         let mut start = first;
         let mut end = end;
