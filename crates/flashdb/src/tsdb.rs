@@ -67,10 +67,6 @@ const SECTOR_STORE_STATUS_NUM: usize = 4;
 /// `FDB_TSL_STATUS_NUM`.
 const TSL_STATUS_NUM: usize = 6;
 
-/// Size of the largest TSDB sector header (write granularity 256 bits).
-const MAX_SEC_HDR_SIZE: usize = 640;
-/// Size of the largest TSDB index record (write granularity 256 bits).
-const MAX_LOG_IDX_SIZE: usize = 192;
 /// Size of the largest write-granule aligned field block (256 bits).
 const MAX_ALIGN: usize = 32;
 
@@ -379,6 +375,80 @@ fn sector_has_entries<T: Timestamp>(sec: &SecInfo<T>, sec_hdr_size: u32) -> bool
     sec.end_idx != FAILED_ADDR && sec.end_idx >= sec.addr + sec_hdr_size
 }
 
+/// Decode a TSDB sector header from its raw bytes (`read_sector_info`).
+#[inline]
+fn decode_sector_header<T: Timestamp>(
+    addr: u32,
+    raw: &[u8],
+    layout: &TsLayout,
+    wg: u32,
+) -> SecInfo<T> {
+    let mut sec = SecInfo {
+        addr,
+        ..Default::default()
+    };
+    if get_u32(raw, layout.sec_magic_off as usize) != TSDB_SECTOR_MAGIC {
+        /* invalid magic: check_ok stays false */
+        return sec;
+    }
+    sec.check_ok = true;
+    sec.status = SectorStoreStatus::from_index(decode_status(
+        wg,
+        SECTOR_STORE_STATUS_NUM,
+        &raw[layout.sec_store_off as usize..],
+    ));
+    sec.start_time = T::read_le(raw, layout.sec_start_time_off as usize);
+    sec.end_info_stat[0] = TslStatus::from_index(decode_status(
+        wg,
+        TSL_STATUS_NUM,
+        &raw[layout.sec_end0_stat_off as usize..],
+    ));
+    sec.end_info_stat[1] = TslStatus::from_index(decode_status(
+        wg,
+        TSL_STATUS_NUM,
+        &raw[layout.sec_end1_stat_off as usize..],
+    ));
+    if sec.end_info_stat[0] == TslStatus::Write {
+        sec.end_time = T::read_le(raw, layout.sec_end0_time_off as usize);
+        sec.end_idx = get_u32(raw, layout.sec_end0_idx_off as usize);
+    } else if sec.end_info_stat[1] == TslStatus::Write {
+        sec.end_time = T::read_le(raw, layout.sec_end1_time_off as usize);
+        sec.end_idx = get_u32(raw, layout.sec_end1_idx_off as usize);
+    }
+    sec
+}
+
+/// Decode one index record from its raw bytes (`read_tsl`).
+#[inline]
+fn decode_tsl<T: Timestamp>(
+    index_addr: u32,
+    raw: &[u8],
+    layout: &TsLayout,
+    wg: u32,
+    max_len: u32,
+) -> TslEntry<T> {
+    let status = TslStatus::from_index(decode_status(wg, TSL_STATUS_NUM, raw));
+    let mut entry = TslEntry {
+        status,
+        time: T::default(),
+        log_len: 0,
+        index_addr,
+        log_addr: FAILED_ADDR,
+    };
+    if status == TslStatus::PreWrite || status == TslStatus::Unused {
+        /* An index record without valid metadata: report the worst case payload
+         * size and no payload address, exactly like C. */
+        entry.log_len = max_len;
+        entry.log_addr = FAILED_ADDR;
+        entry.time = T::default();
+    } else {
+        entry.log_len = get_u32(raw, layout.log_idx_loglen_off as usize);
+        entry.log_addr = get_u32(raw, layout.log_idx_logaddr_off as usize);
+        entry.time = T::read_le(raw, layout.log_idx_ts_off as usize);
+    }
+    entry
+}
+
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
@@ -420,6 +490,13 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
          * physical sector, which is wrong after an interrupted wrap. */
         let mut latest_full_addr = FAILED_ADDR;
         let mut latest_full_time = T::default();
+        let mut latest_full_info = SecInfo::default();
+        /* The last sector read by the check loop is always the last physical
+         * sector; the check loop result can be reused for the final
+         * read_sector_info() of the current sector instead of reading flash
+         * twice. No write happens in between, so both are identical. */
+        let mut last_sector_info = SecInfo::default();
+        let mut cur_sector_info = SecInfo::default();
         let mut addr = 0u32;
         let mut traversed_len = 0u32;
         loop {
@@ -428,6 +505,9 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
              * once more (with traversal) when the status filter matches. */
             let _ = db.read_sector_info(addr, false)?;
             let sec = db.read_sector_info(addr, true)?;
+            if sec.addr == max_size - sec_size {
+                last_sector_info = sec;
+            }
             if !sec.check_ok {
                 check_failed = true;
                 break;
@@ -448,6 +528,10 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             } else if sec.status == SectorStoreStatus::Full && sec.end_time > latest_full_time {
                 latest_full_time = sec.end_time;
                 latest_full_addr = sec.addr;
+                latest_full_info = sec;
+            }
+            if db.cur_sec.addr == sec.addr {
+                cur_sector_info = sec;
             }
             match next_sector_addr(sec.addr, traversed_len, sec_size, max_size) {
                 Some(next) => addr = next,
@@ -491,7 +575,20 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             };
 
             let cur_addr = db.cur_sec.addr;
-            db.cur_sec = db.read_sector_info(cur_addr, true)?;
+            /* Reuse the header already decoded by the check loop (see above). */
+            let cached = if cur_addr == max_size - sec_size {
+                Some(last_sector_info)
+            } else if cur_addr == latest_full_addr {
+                Some(latest_full_info)
+            } else if cur_addr == cur_sector_info.addr {
+                Some(cur_sector_info)
+            } else {
+                None
+            };
+            db.cur_sec = match cached {
+                Some(sec) => sec,
+                None => db.read_sector_info(cur_addr, true)?,
+            };
             /* Recover the last saved timestamp (fdb_tsdb_init). */
             match db.cur_sec.status {
                 SectorStoreStatus::Using => {
@@ -698,32 +795,41 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     }
 
     /// Read one index record (`read_tsl()`).
+    ///
+    /// The stack buffer is sized per write granularity/timestamp width instead
+    /// of always using the largest layout, which keeps this per-entry hot path
+    /// cheap on the common 1/8/32-bit configurations.
     fn read_tsl(&mut self, index_addr: u32) -> Result<TslEntry<T>, F::Error> {
         let layout = self.layout;
         let wg = F::WRITE_GRAN_BITS;
-        let mut raw = [F::ERASED_BYTE; MAX_LOG_IDX_SIZE];
-        self.storage
-            .read(index_addr, &mut raw[..layout.log_idx_raw_size as usize])?;
-
-        let status = TslStatus::from_index(decode_status(wg, TSL_STATUS_NUM, &raw[..]));
-        let mut entry = TslEntry {
-            status,
-            time: T::default(),
-            log_len: 0,
-            index_addr,
-            log_addr: FAILED_ADDR,
-        };
-        if status == TslStatus::PreWrite || status == TslStatus::Unused {
-            /* An index record without valid metadata: report the worst case
-             * payload size and no payload address, exactly like C. */
-            entry.log_len = self.max_len;
-            entry.log_addr = FAILED_ADDR;
-            entry.time = T::default();
+        let size = layout.log_idx_raw_size as usize;
+        let max_len = self.max_len;
+        let entry = if wg <= 8 {
+            /* at most 24 B: 24 B for 64-bit timestamps at WG=1/8 */
+            let mut raw = [F::ERASED_BYTE; 24];
+            self.storage.read(index_addr, &mut raw[..size])?;
+            decode_tsl(index_addr, &raw[..size], &layout, wg, max_len)
+        } else if wg <= 32 {
+            /* at most 40 B (64-bit timestamps at WG=32) */
+            let mut raw = [F::ERASED_BYTE; 40];
+            self.storage.read(index_addr, &mut raw[..size])?;
+            decode_tsl(index_addr, &raw[..size], &layout, wg, max_len)
+        } else if wg <= 64 {
+            /* at most 56 B */
+            let mut raw = [F::ERASED_BYTE; 56];
+            self.storage.read(index_addr, &mut raw[..size])?;
+            decode_tsl(index_addr, &raw[..size], &layout, wg, max_len)
+        } else if wg <= 128 {
+            /* at most 96 B */
+            let mut raw = [F::ERASED_BYTE; 96];
+            self.storage.read(index_addr, &mut raw[..size])?;
+            decode_tsl(index_addr, &raw[..size], &layout, wg, max_len)
         } else {
-            entry.log_len = get_u32(&raw, layout.log_idx_loglen_off as usize);
-            entry.log_addr = get_u32(&raw, layout.log_idx_logaddr_off as usize);
-            entry.time = T::read_le(&raw, layout.log_idx_ts_off as usize);
-        }
+            /* at most 192 B (WG=256) */
+            let mut raw = [F::ERASED_BYTE; 192];
+            self.storage.read(index_addr, &mut raw[..size])?;
+            decode_tsl(index_addr, &raw[..size], &layout, wg, max_len)
+        };
         Ok(entry)
     }
 
@@ -733,45 +839,41 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         let layout = self.layout;
         let wg = F::WRITE_GRAN_BITS;
         let sec_size = self.storage.sec_size();
-        let mut raw = [F::ERASED_BYTE; MAX_SEC_HDR_SIZE];
-        self.storage
-            .read(addr, &mut raw[..layout.sec_raw_size as usize])?;
-
-        let mut sec = SecInfo {
-            addr,
-            ..Default::default()
+        let size = layout.sec_raw_size as usize;
+        /* The stack buffer is sized per write granularity and timestamp width
+         * (92 B for the common 32-bit timestamp / 8-bit write granularity
+         * case) instead of zero-filling the largest 640 B layout. */
+        let mut sec = if wg <= 8 {
+            /* at most 56 B (64-bit timestamps at WG=8) */
+            let mut raw = [F::ERASED_BYTE; 56];
+            self.storage.read(addr, &mut raw[..size])?;
+            decode_sector_header(addr, &raw[..size], &layout, wg)
+        } else if wg <= 32 {
+            /* at most 92 B (64-bit timestamps at WG=32) */
+            let mut raw = [F::ERASED_BYTE; 92];
+            self.storage.read(addr, &mut raw[..size])?;
+            decode_sector_header(addr, &raw[..size], &layout, wg)
+        } else if wg <= 64 {
+            /* at most 160 B */
+            let mut raw = [F::ERASED_BYTE; 160];
+            self.storage.read(addr, &mut raw[..size])?;
+            decode_sector_header(addr, &raw[..size], &layout, wg)
+        } else if wg <= 128 {
+            /* at most 320 B */
+            let mut raw = [F::ERASED_BYTE; 320];
+            self.storage.read(addr, &mut raw[..size])?;
+            decode_sector_header(addr, &raw[..size], &layout, wg)
+        } else {
+            /* at most 640 B (WG=256) */
+            let mut raw = [F::ERASED_BYTE; 640];
+            self.storage.read(addr, &mut raw[..size])?;
+            decode_sector_header(addr, &raw[..size], &layout, wg)
         };
-        if get_u32(&raw, layout.sec_magic_off as usize) != TSDB_SECTOR_MAGIC {
-            sec.check_ok = false;
+        if !sec.check_ok {
             return Ok(sec);
         }
-        sec.check_ok = true;
-        sec.status = SectorStoreStatus::from_index(decode_status(
-            wg,
-            SECTOR_STORE_STATUS_NUM,
-            &raw[layout.sec_store_off as usize..],
-        ));
-        sec.start_time = T::read_le(&raw, layout.sec_start_time_off as usize);
-        sec.end_info_stat[0] = TslStatus::from_index(decode_status(
-            wg,
-            TSL_STATUS_NUM,
-            &raw[layout.sec_end0_stat_off as usize..],
-        ));
-        sec.end_info_stat[1] = TslStatus::from_index(decode_status(
-            wg,
-            TSL_STATUS_NUM,
-            &raw[layout.sec_end1_stat_off as usize..],
-        ));
-        let mut end_info_valid = false;
-        if sec.end_info_stat[0] == TslStatus::Write {
-            sec.end_time = T::read_le(&raw, layout.sec_end0_time_off as usize);
-            sec.end_idx = get_u32(&raw, layout.sec_end0_idx_off as usize);
-            end_info_valid = true;
-        } else if sec.end_info_stat[1] == TslStatus::Write {
-            sec.end_time = T::read_le(&raw, layout.sec_end1_time_off as usize);
-            sec.end_idx = get_u32(&raw, layout.sec_end1_idx_off as usize);
-            end_info_valid = true;
-        }
+        let end_info_valid =
+            sec.end_info_stat[0] == TslStatus::Write || sec.end_info_stat[1] == TslStatus::Write;
 
         /* The TSL payloads are saved from the sector bottom, the indexes from
          * the sector top. */
@@ -1014,15 +1116,21 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             TSL_STATUS_NUM,
             tsl_status_index(TslStatus::PreWrite),
         )?;
-        /* write the other index info: time + log_len + log_addr (+ padding) */
-        let mut raw = [F::ERASED_BYTE; MAX_LOG_IDX_SIZE];
-        time.write_le(&mut raw, layout.log_idx_ts_off as usize);
-        put_u32(&mut raw, layout.log_idx_loglen_off as usize, data.len() as u32);
-        put_u32(&mut raw, layout.log_idx_logaddr_off as usize, log_addr);
-        self.storage.write(
-            idx_addr + layout.log_idx_ts_off,
-            &raw[layout.log_idx_ts_off as usize..layout.log_idx_raw_size as usize],
-        )?;
+        /* write the other index info: time + log_len + log_addr (+ padding).
+         * C writes the tail of the index struct starting at the timestamp; its
+         * length is at most 32 bytes for every supported layout, so a small
+         * buffer with relative offsets is enough. */
+        let ts_off = layout.log_idx_ts_off;
+        let len_off = (layout.log_idx_loglen_off - ts_off) as usize;
+        let addr_off = (layout.log_idx_logaddr_off - ts_off) as usize;
+        let block_len = (layout.log_idx_raw_size - ts_off) as usize;
+        let mut block = [F::ERASED_BYTE; MAX_ALIGN];
+        debug_assert!(block_len <= block.len());
+        time.write_le(&mut block, 0);
+        put_u32(&mut block, len_off, data.len() as u32);
+        put_u32(&mut block, addr_off, log_addr);
+        self.storage
+            .write(idx_addr + ts_off, &block[..block_len])?;
         /* write the blob data */
         self.storage.write_align(log_addr, data)?;
         /* write the status by write granularity */

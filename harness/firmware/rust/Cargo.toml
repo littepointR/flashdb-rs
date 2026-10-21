@@ -15,6 +15,12 @@ publish = false
 name = "fw-rust"
 path = "main.rs"
 
+[features]
+# Include the per-phase stack-attribution instrumentation (see main.rs).
+# Off by default so the measured baseline image stays lean; scripts/fw_rust.sh
+# --phases builds with this feature for the attribution run.
+stack-phases = []
+
 [dependencies]
 # Real Rust rewrite under measurement (no_std, no external dependencies).
 # NOTE: the firmware implements flashdb::Flash directly over the .sim_flash

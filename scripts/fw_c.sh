@@ -9,7 +9,9 @@
 # deterministic workload checksums.
 #
 # Usage:
-#   scripts/fw_c.sh                 # build + run
+#   scripts/fw_c.sh                 # build + run (baseline build)
+#   scripts/fw_c.sh --phases        # diagnostic build with per-phase stack peaks
+#   scripts/fw_c.sh --symbols       # also print symbol-level size attribution
 #   scripts/fw_c.sh --build-only    # build, print sizes, do not run QEMU
 #   scripts/fw_c.sh --clean         # remove build products first
 #   scripts/fw_c.sh --help
@@ -80,20 +82,31 @@ die() {
 }
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
 BUILD_ONLY=0
 CLEAN=0
+PHASES=0
+SYMBOLS=0
 for arg in "$@"; do
   case "$arg" in
     --help|-h) usage ;;
     --build-only) BUILD_ONLY=1 ;;
     --clean) CLEAN=1 ;;
+    --phases) PHASES=1 ;;
+    --symbols) SYMBOLS=1 ;;
     *) die "unknown argument: $arg (try --help)" ;;
   esac
 done
+
+if [ "$PHASES" = "1" ]; then
+  # Diagnostic build: adds the per-phase stack-attribution code (common/stack.c,
+  # c/main.c).  It is NOT the baseline: the extra code changes ROM/stack, so
+  # use the default build for the headline numbers.
+  CFLAGS+=(-DHARNESS_STACK_PHASES=1)
+fi
 
 command -v "$CC" >/dev/null 2>&1 || die "C compiler not found: $CC (set CC=...)"
 command -v "$SIZE" >/dev/null 2>&1 || die "size tool not found: $SIZE (set SIZE=...)"
@@ -112,6 +125,9 @@ echo "== C FlashDB baseline firmware =="
 echo "   compiler : $("$CC" --version | head -1)"
 echo "   target   : cortex-m3 / thumbv7m / MPS2-AN385 (qemu: $QEMU_MACHINE)"
 echo "   config   : FDB_WRITE_GRAN=8, FAL mode, KVDB+TSDB, logging compiled out"
+if [ "$PHASES" = "1" ]; then
+  echo "   mode     : DIAGNOSTIC (per-phase stack attribution; not the baseline build)"
+fi
 echo "   output   : $ELF"
 echo
 
@@ -171,6 +187,11 @@ echo "   defined workloads: KVDB 64 set + 32 update + 1500 churn + 64 verified g
 echo "                      + full iterate; TSDB 200 append + full iterate"
 echo "   simulated NOR: 16 KiB KVDB partition + 16 KiB TSDB partition"
 echo
+if [ "$SYMBOLS" = "1" ]; then
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for --symbols"
+  python3 "$FW/tools/symbol_report.py" "$ELF" --kind c --objdir "$OBJ" || die "symbol report failed"
+  echo
+fi
 
 if [ "$BUILD_ONLY" = "1" ]; then
   echo "build only: skipping QEMU"

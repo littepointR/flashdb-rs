@@ -15,7 +15,7 @@
 //! ```no_run
 //! # use flashdb::{Config, Flash, Kvdb};
 //! # fn demo<F: Flash>(flash: F) -> Result<(), flashdb::Error<F::Error>> {
-//! let mut db = Kvdb::mount_with_defaults(flash, Config::new(4096, 16384), &[(b"version", b"1.0")])?;
+//! let mut db = Kvdb::mount_with_defaults(flash, Config::new(4096, 16384), &[("version", b"1.0")])?;
 //! db.set(b"boot_count", &42u32.to_le_bytes())?;
 //!
 //! let mut buf = [0u8; 16];
@@ -420,6 +420,9 @@ pub struct KvdbImpl<F: Flash, const CACHE: usize> {
     storage: Storage<F>,
     cur_sec: SecInfo,
     cache: [CacheSlot; CACHE],
+    /// One MRU bit per cache set (bit = which of the two ways is most
+    /// recently used). Sets above 32 fall back to replacing way 0.
+    cache_lru: u32,
     gc_request: bool,
     in_recovery: bool,
     /// Set while a record is pre-deleted as part of an update; suppresses the
@@ -489,6 +492,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             storage,
             cur_sec: SecInfo::UNKNOWN,
             cache: [CacheSlot::EMPTY; CACHE],
+            cache_lru: 0,
             gc_request: false,
             in_recovery: false,
             last_is_complete_del: false,
@@ -517,38 +521,107 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         F::WRITE_GRAN_BITS
     }
 
-    #[inline]
-    fn hash_index(hash: u32) -> Option<usize> {
-        if CACHE == 0 {
-            None
+    /// Number of cache sets (2-way set associative; 1 direct-mapped entry for
+    /// tiny cache sizes).
+    #[inline(always)]
+    fn cache_sets() -> usize {
+        if CACHE >= 2 {
+            CACHE / 2
         } else {
-            Some(hash as usize % CACHE)
+            CACHE
+        }
+    }
+
+    #[inline(always)]
+    fn cache_ways() -> usize {
+        if CACHE >= 2 {
+            2
+        } else if CACHE == 1 {
+            1
+        } else {
+            0
         }
     }
 
     #[inline]
-    fn cache_lookup(&self, hash: u32) -> Option<u32> {
-        let idx = Self::hash_index(hash)?;
-        let slot = self.cache[idx];
-        if slot.addr != FAILED_ADDR && slot.hash == hash {
-            Some(slot.addr)
-        } else {
-            None
+    fn cache_lookup(&mut self, hash: u32) -> Option<u32> {
+        let sets = Self::cache_sets();
+        if sets == 0 {
+            return None;
         }
+        let set_index = hash as usize % sets;
+        let base = set_index * Self::cache_ways();
+        for way in 0..Self::cache_ways() {
+            let slot = self.cache[base + way];
+            if slot.addr != FAILED_ADDR && slot.hash == hash {
+                if sets <= 32 && set_index < 32 {
+                    // Mark the hit way as most recently used.
+                    self.cache_lru =
+                        (self.cache_lru & !(1 << set_index)) | ((way as u32) << set_index);
+                }
+                return Some(slot.addr);
+            }
+        }
+        None
     }
 
     #[inline]
     fn cache_insert(&mut self, hash: u32, addr: u32) {
-        if let Some(idx) = Self::hash_index(hash) {
-            self.cache[idx] = CacheSlot { hash, addr };
+        let sets = Self::cache_sets();
+        if sets == 0 {
+            return;
         }
+        let set_index = hash as usize % sets;
+        let base = set_index * Self::cache_ways();
+        let ways = Self::cache_ways();
+        let mut slot_index = base;
+        // If this exact hash is already cached, just move the address (the
+        // common update path).
+        for way in 0..ways {
+            if self.cache[base + way].hash == hash && self.cache[base + way].addr != FAILED_ADDR {
+                self.cache[base + way].addr = addr;
+                if sets <= 32 && set_index < 32 {
+                    self.cache_lru =
+                        (self.cache_lru & !(1 << set_index)) | ((way as u32) << set_index);
+                }
+                return;
+            }
+        }
+        if ways >= 2 {
+            let mru = if set_index < 32 {
+                (self.cache_lru >> set_index) & 1
+            } else {
+                1
+            };
+            // Prefer an empty way (updating the LRU bit), otherwise replace the
+            // least recently used way.
+            let way1 = base + 1;
+            if self.cache[base].addr == FAILED_ADDR {
+                slot_index = base;
+            } else if self.cache[way1].addr == FAILED_ADDR {
+                slot_index = way1;
+            } else {
+                slot_index = if mru == 0 { way1 } else { base };
+            }
+            if set_index < 32 {
+                let new_mru = (slot_index - base) as u32;
+                self.cache_lru = (self.cache_lru & !(1 << set_index))
+                    | (new_mru << set_index);
+            }
+        }
+        self.cache[slot_index] = CacheSlot { hash, addr };
     }
 
     #[inline]
     fn cache_invalidate(&mut self, hash: u32) {
-        if let Some(idx) = Self::hash_index(hash) {
-            if self.cache[idx].hash == hash {
-                self.cache[idx] = CacheSlot::EMPTY;
+        let sets = Self::cache_sets();
+        if sets == 0 {
+            return;
+        }
+        let base = (hash as usize % sets) * Self::cache_ways();
+        for way in 0..Self::cache_ways() {
+            if self.cache[base + way].hash == hash {
+                self.cache[base + way] = CacheSlot::EMPTY;
             }
         }
     }
@@ -594,15 +667,26 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         })
     }
 
-    /// Read the key name of a record (including write-granule padding).
-    fn read_name(&mut self, hdr: &KvHeader) -> Result<[u8; KV_NAME_MAX], F::Error> {
+    /// Read the key name of a record (including write-granule padding) into
+    /// the caller's buffer, avoiding a temporary copy.
+    fn read_name_into(
+        &mut self,
+        hdr: &KvHeader,
+        name: &mut [u8; KV_NAME_MAX],
+    ) -> Result<(), F::Error> {
         let lay = self.lay();
-        let mut name = [0u8; KV_NAME_MAX];
         let aligned = wg_align(hdr.name_len as usize, self.wg());
         if aligned > 0 {
             self.storage
                 .read(hdr.addr + lay.kv_hdr_size, &mut name[..aligned])?;
         }
+        Ok(())
+    }
+
+    /// Read the key name of a record (including write-granule padding).
+    fn read_name(&mut self, hdr: &KvHeader) -> Result<[u8; KV_NAME_MAX], F::Error> {
+        let mut name = [0u8; KV_NAME_MAX];
+        self.read_name_into(hdr, &mut name)?;
         Ok(name)
     }
 
@@ -1090,10 +1174,9 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         if let Some(addr) = self.cache_lookup(hash) {
             let hdr = self.read_kv_header(addr)?;
             if hdr.valid && hdr.status == KvStatus::Write && hdr.name_len as usize == key.len() {
-                let name = self.read_name(&hdr)?;
-                if &name[..key.len()] == key {
-                    let mut entry = self.entry_from_header(&hdr);
-                    entry.name = name;
+                let mut entry = self.entry_from_header(&hdr);
+                self.read_name_into(&hdr, &mut entry.name)?;
+                if &entry.name[..key.len()] == key {
                     return Ok(Some(entry));
                 }
             }
@@ -1125,10 +1208,9 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                         && hdr.status == KvStatus::Write
                         && hdr.name_len as usize == key.len()
                     {
-                        let name = self.read_name(&hdr)?;
-                        if &name[..key.len()] == key {
-                            let mut entry = self.entry_from_header(&hdr);
-                            entry.name = name;
+                        let mut entry = self.entry_from_header(&hdr);
+                        self.read_name_into(&hdr, &mut entry.name)?;
+                        if &entry.name[..key.len()] == key {
                             return Ok(Some(entry));
                         }
                     }
@@ -1728,5 +1810,72 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
             }
             // Invalid or non-committed record: keep going.
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestFlash {
+        data: [u8; 16384],
+    }
+
+    impl TestFlash {
+        fn new() -> Self {
+            Self {
+                data: [0xFF; 16384],
+            }
+        }
+    }
+
+    impl Flash for TestFlash {
+        type Error = core::convert::Infallible;
+        const WRITE_GRAN_BITS: u32 = 8;
+
+        fn read(&mut self, addr: u32, buf: &mut [u8]) -> core::result::Result<(), Self::Error> {
+            let start = addr as usize;
+            buf.copy_from_slice(&self.data[start..start + buf.len()]);
+            Ok(())
+        }
+        fn write(&mut self, addr: u32, buf: &[u8]) -> core::result::Result<(), Self::Error> {
+            let start = addr as usize;
+            for (i, b) in buf.iter().enumerate() {
+                self.data[start + i] &= *b;
+            }
+            Ok(())
+        }
+        fn erase(&mut self, addr: u32, len: u32) -> core::result::Result<(), Self::Error> {
+            let start = addr as usize;
+            self.data[start..start + len as usize].fill(0xFF);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cache_holds_all_small_key_sets() {
+        let mut db = Kvdb::mount(TestFlash::new(), Config::new(4096, 16384)).unwrap();
+        let mut key = [0u8; 8];
+        let mut value = [0u8; 8];
+        for k in 0..32u32 {
+            key[..2].copy_from_slice(b"kv");
+            key[2] = b'0' + (k % 8) as u8;
+            for j in 0..8 {
+                value[j] = (0x11u32 + k * 31 + j as u32 * 7) as u8;
+            }
+            db.set(&key[..3], &value).unwrap();
+            // Every key of the last round must be a cache hit.
+            if k >= 16 {
+                let hash = hash_key(&key[..3]);
+                assert!(
+                    db.cache_lookup(hash).is_some(),
+                    "cache miss for {:?} at k={k}",
+                    core::str::from_utf8(&key[..3]).unwrap()
+                );
+            }
+        }
+        let occupied = db.cache.iter().filter(|s| s.addr != FAILED_ADDR).count();
+        // Eight distinct keys that map to eight distinct sets (one slot each).
+        assert_eq!(occupied, 8);
     }
 }

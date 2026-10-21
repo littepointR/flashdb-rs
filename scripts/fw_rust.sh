@@ -15,6 +15,9 @@
 # Usage:
 #   scripts/fw_rust.sh                 # release profile (opt-level="s", LTO)
 #   scripts/fw_rust.sh size            # "size" profile (opt-level="z", LTO)
+#   scripts/fw_rust.sh --phases        # diagnostic build with per-phase stack peaks
+#   scripts/fw_rust.sh --symbols       # also print symbol-level size attribution
+#   scripts/fw_rust.sh size --phases --symbols   # flags compose
 #   scripts/fw_rust.sh --build-only    # build + sizes only, no QEMU
 #   scripts/fw_rust.sh --clean         # remove cargo target dir first
 #   scripts/fw_rust.sh --help
@@ -48,23 +51,37 @@ die() {
 }
 
 usage() {
-  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
 PROFILE="release"
 BUILD_ONLY=0
 CLEAN=0
+PHASES=0
+SYMBOLS=0
+FEATURE_ARGS=()
+SUFFIX=""
 for arg in "$@"; do
   case "$arg" in
     --help|-h) usage ;;
     --build-only) BUILD_ONLY=1 ;;
     --clean) CLEAN=1 ;;
+    --phases) PHASES=1 ;;
+    --symbols) SYMBOLS=1 ;;
     release) PROFILE="release" ;;
     size) PROFILE="size" ;;
     *) die "unknown argument: $arg (try --help)" ;;
   esac
 done
+
+if [ "$PHASES" = "1" ]; then
+  # Diagnostic build: per-phase stack-attribution instrumentation.  It is NOT
+  # the baseline (extra code changes ROM/stack), and the ELF gets a _phases
+  # suffix so the baseline artifact is not overwritten.
+  FEATURE_ARGS=(--features stack-phases)
+  SUFFIX="_phases"
+fi
 
 command -v "$CARGO" >/dev/null 2>&1 || die "cargo not found: $CARGO (set CARGO=...)"
 command -v "$RUSTC" >/dev/null 2>&1 || die "rustc not found: $RUSTC (set RUSTC=...)"
@@ -97,7 +114,7 @@ echo "   cargo    : $("$CARGO" --version)"
 echo "   target   : $TARGET / Cortex-M3 / MPS2-AN385 (qemu: $QEMU_MACHINE)"
 echo "   crate    : crates/flashdb (real Rust rewrite), crates/flashdb-sim not used"
 echo "              in the firmware image: the RAM NOR driver lives in main.rs"
-echo "   output   : $ELF_DIR/fw_rust_$PROFILE.elf"
+echo "   output   : $ELF_DIR/fw_rust_${PROFILE}${SUFFIX}.elf"
 echo
 
 BUILD_LOG="$BUILD/cargo.log"
@@ -105,7 +122,8 @@ BUILD_LOG="$BUILD/cargo.log"
   cd "$RUST_DIR" || exit 1
   CARGO_TARGET_DIR="$BUILD/target" \
   CARGO_TARGET_THUMBV7M_NONE_EABI_LINKER="arm-none-eabi-gcc" \
-  "$CARGO" rustc --bin fw-rust --target "$TARGET" --offline "${PROFILE_ARGS[@]}" -- \
+  "$CARGO" rustc --bin fw-rust --target "$TARGET" --offline "${PROFILE_ARGS[@]}" \
+      ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} -- \
       -C link-arg=-T"$LINKER" \
       -C link-arg=-nostartfiles \
       -C link-arg=-nostdlib \
@@ -125,7 +143,7 @@ echo
 
 CARGO_ELF="$BUILD/target/$TARGET/$PROFILE/fw-rust"
 [ -f "$CARGO_ELF" ] || die "expected binary not found: $CARGO_ELF"
-ELF="$ELF_DIR/fw_rust_$PROFILE.elf"
+ELF="$ELF_DIR/fw_rust_${PROFILE}${SUFFIX}.elf"
 cp "$CARGO_ELF" "$ELF"
 SIZE="${SIZE:-arm-none-eabi-size}"
 command -v "$SIZE" >/dev/null 2>&1 || die "size tool not found: $SIZE (set SIZE=...)"
@@ -142,6 +160,11 @@ echo "                      200 append + 200 'iterate' (deterministic payloads)"
 echo "   simulated NOR: 16 KiB KVDB partition in the .sim_flash NOLOAD region"
 echo "                  (no TS partition until the real TSDB API is wired in)"
 echo
+if [ "$SYMBOLS" = "1" ]; then
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for --symbols"
+  python3 "$FW/tools/symbol_report.py" "$ELF" --kind rust || die "symbol report failed"
+  echo
+fi
 
 if [ "$BUILD_ONLY" = "1" ]; then
   echo "build only: skipping QEMU"

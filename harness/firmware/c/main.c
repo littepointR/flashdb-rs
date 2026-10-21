@@ -308,6 +308,84 @@ static void tsdb_phase(struct harness_metrics *m)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Per-phase stack attribution (diagnostic builds only)                       */
+/* ------------------------------------------------------------------------- */
+
+#ifdef HARNESS_STACK_PHASES
+/*
+ * Runs AFTER the headline scan, so it never changes the reported `stack`: the
+ * stack is repainted between phases, which would otherwise erase the headline
+ * high-water marks.  Each phase is measured from a freshly painted stack, so
+ * the number is that phase's peak plus the live caller frames.  Mirrors the
+ * Rust firmware's stack_diagnostics() exactly.
+ */
+static void stack_diagnostics(struct harness_metrics *m)
+{
+    char key[8];
+    char value[HW_KV_VALUE_LEN + 1];
+    char read_buf[HW_KV_VALUE_LEN + 1];
+    uint8_t iter_buf[HW_KV_VALUE_LEN + 1];
+    struct fdb_blob blob;
+    struct fdb_kv_iterator itr;
+    fdb_err_t err;
+    size_t got;
+    uint32_t n;
+
+    /* (b) one set */
+    stack_repaint();
+    make_kv_key(key, 0);
+    make_kv_value(value, 0, 0x3000u);
+    err = fdb_kv_set(&g_kvdb, key, value);
+    if (err != FDB_NO_ERR) {
+        harness_fail("st_set", (int)err);
+    }
+    m->st_set = stack_high_water_bytes();
+
+    /* (c) one get */
+    stack_repaint();
+    got = fdb_kv_get_blob(&g_kvdb, key,
+                          fdb_blob_make(&blob, read_buf, HW_KV_VALUE_LEN));
+    if (got != HW_KV_VALUE_LEN) {
+        harness_fail("st_get", (int)got);
+    }
+    m->st_get = stack_high_water_bytes();
+
+    /* (d) full iteration */
+    stack_repaint();
+    memset(&itr, 0, sizeof(itr));
+    fdb_kv_iterator_init(&g_kvdb, &itr);
+    n = 0;
+    while (fdb_kv_iterate(&g_kvdb, &itr)) {
+        got = fdb_blob_read(
+            (fdb_db_t)&g_kvdb,
+            fdb_kv_to_blob(&itr.curr_kv,
+                           fdb_blob_make(&blob, iter_buf, sizeof(iter_buf))));
+        if (got > sizeof(iter_buf)) {
+            harness_fail("st_iter_read", (int)got);
+        }
+        n++;
+    }
+    if (n != HW_KV_KEYS) {
+        harness_fail("st_iter_count", (int)n);
+    }
+    m->st_iter = stack_high_water_bytes();
+
+    /* (e) GC churn (same write pattern as the measured workload) */
+    stack_repaint();
+    for (n = 0; n < HW_KV_CHURN; n++) {
+        uint32_t idx = n % HW_KV_CHURN_KEYS;
+        make_kv_key(key, idx);
+        make_kv_value(value, idx, 0x4000u + n);
+        err = fdb_kv_set(&g_kvdb, key, value);
+        if (err != FDB_NO_ERR) {
+            harness_fail("st_gc", (int)err);
+        }
+    }
+    m->st_gc = stack_high_water_bytes();
+}
+#endif /* HARNESS_STACK_PHASES */
+
+/* ------------------------------------------------------------------------- */
 /* Entry point                                                               */
 /* ------------------------------------------------------------------------- */
 
@@ -330,6 +408,11 @@ int main(void)
     /* Final scan after both phases have returned to this shallow frame.  The
      * scan sees the deepest frame of the whole run, including init. */
     m.stack = stack_high_water_bytes();
+
+#ifdef HARNESS_STACK_PHASES
+    /* Per-phase attribution (does not affect m.stack: repaints happen after). */
+    stack_diagnostics(&m);
+#endif
 
     harness_print_result(&m);
     harness_exit();

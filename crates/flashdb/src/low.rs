@@ -479,18 +479,6 @@ pub(crate) const fn kv_layout(wg_bits: u32) -> Option<KvLayout> {
     Some(l)
 }
 
-/// Length of the sector header block written from `sec_magic_off` onwards.
-#[inline]
-pub(crate) const fn kv_sec_magic_block_len(l: &KvLayout) -> usize {
-    (l.sec_raw_size - l.sec_magic_off) as usize
-}
-
-/// Length of the KV header block written from `kv_magic_off` onwards.
-#[inline]
-pub(crate) const fn kv_hdr_magic_block_len(l: &KvLayout) -> usize {
-    (l.kv_raw_size - l.kv_magic_off) as usize
-}
-
 // ---------------------------------------------------------------------------
 // TSDB layout
 // ---------------------------------------------------------------------------
@@ -510,15 +498,11 @@ pub(crate) struct TsLayout {
     pub sec_end1_time_off: u32,
     pub sec_end1_idx_off: u32,
     pub sec_end1_stat_off: u32,
-    pub sec_store_status_size: u32,
-    pub tsl_status_size: u32,
     /// `TSL_UINT32_ALIGN_SIZE`: alignment of a u32 field in the TS structs.
     pub uint32_align: u32,
     /// `TSL_TIME_ALIGN_SIZE`: alignment of one timestamp.
-    pub time_align: u32,
     pub log_idx_size: u32,
     pub log_idx_raw_size: u32,
-    pub log_idx_status_size: u32,
     pub log_idx_ts_off: u32,
     pub log_idx_loglen_off: u32,
     pub log_idx_logaddr_off: u32,
@@ -539,13 +523,9 @@ pub(crate) const fn ts_layout_32(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 18,
             sec_end1_idx_off: 22,
             sec_end1_stat_off: 26,
-            sec_store_status_size: 1,
-            tsl_status_size: 1,
             uint32_align: 4,
-            time_align: 4,
             log_idx_size: 16,
             log_idx_raw_size: 16,
-            log_idx_status_size: 1,
             log_idx_ts_off: 4,
             log_idx_loglen_off: 8,
             log_idx_logaddr_off: 12,
@@ -562,13 +542,9 @@ pub(crate) const fn ts_layout_32(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 24,
             sec_end1_idx_off: 28,
             sec_end1_stat_off: 32,
-            sec_store_status_size: 3,
-            tsl_status_size: 5,
             uint32_align: 4,
-            time_align: 4,
             log_idx_size: 20,
             log_idx_raw_size: 20,
-            log_idx_status_size: 5,
             log_idx_ts_off: 8,
             log_idx_loglen_off: 12,
             log_idx_logaddr_off: 16,
@@ -585,13 +561,9 @@ pub(crate) const fn ts_layout_32(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 48,
             sec_end1_idx_off: 52,
             sec_end1_stat_off: 56,
-            sec_store_status_size: 12,
-            tsl_status_size: 20,
             uint32_align: 4,
-            time_align: 4,
             log_idx_size: 32,
             log_idx_raw_size: 32,
-            log_idx_status_size: 20,
             log_idx_ts_off: 20,
             log_idx_loglen_off: 24,
             log_idx_logaddr_off: 28,
@@ -608,13 +580,9 @@ pub(crate) const fn ts_layout_32(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 96,
             sec_end1_idx_off: 104,
             sec_end1_stat_off: 112,
-            sec_store_status_size: 24,
-            tsl_status_size: 40,
             uint32_align: 8,
-            time_align: 8,
             log_idx_size: 56,
             log_idx_raw_size: 56,
-            log_idx_status_size: 40,
             log_idx_ts_off: 40,
             log_idx_loglen_off: 44,
             log_idx_logaddr_off: 48,
@@ -631,13 +599,9 @@ pub(crate) const fn ts_layout_32(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 192,
             sec_end1_idx_off: 208,
             sec_end1_stat_off: 224,
-            sec_store_status_size: 48,
-            tsl_status_size: 80,
             uint32_align: 16,
-            time_align: 16,
             log_idx_size: 96,
             log_idx_raw_size: 96,
-            log_idx_status_size: 80,
             log_idx_ts_off: 80,
             log_idx_loglen_off: 84,
             log_idx_logaddr_off: 88,
@@ -654,13 +618,9 @@ pub(crate) const fn ts_layout_32(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 384,
             sec_end1_idx_off: 416,
             sec_end1_stat_off: 448,
-            sec_store_status_size: 96,
-            tsl_status_size: 160,
             uint32_align: 32,
-            time_align: 32,
             log_idx_size: 192,
             log_idx_raw_size: 192,
-            log_idx_status_size: 160,
             log_idx_ts_off: 160,
             log_idx_loglen_off: 164,
             log_idx_logaddr_off: 168,
@@ -685,13 +645,9 @@ pub(crate) const fn ts_layout_64(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 26,
             sec_end1_idx_off: 34,
             sec_end1_stat_off: 38,
-            sec_store_status_size: 1,
-            tsl_status_size: 1,
             uint32_align: 4,
-            time_align: 8,
             log_idx_size: 24,
             log_idx_raw_size: 24,
-            log_idx_status_size: 1,
             log_idx_ts_off: 8,
             log_idx_loglen_off: 16,
             log_idx_logaddr_off: 20,
@@ -708,13 +664,9 @@ pub(crate) const fn ts_layout_64(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 32,
             sec_end1_idx_off: 40,
             sec_end1_stat_off: 44,
-            sec_store_status_size: 3,
-            tsl_status_size: 5,
             uint32_align: 4,
-            time_align: 8,
             log_idx_size: 24,
             log_idx_raw_size: 24,
-            log_idx_status_size: 5,
             log_idx_ts_off: 8,
             log_idx_loglen_off: 16,
             log_idx_logaddr_off: 20,
@@ -731,13 +683,9 @@ pub(crate) const fn ts_layout_64(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 56,
             sec_end1_idx_off: 64,
             sec_end1_stat_off: 68,
-            sec_store_status_size: 12,
-            tsl_status_size: 20,
             uint32_align: 4,
-            time_align: 8,
             log_idx_size: 40,
             log_idx_raw_size: 40,
-            log_idx_status_size: 20,
             log_idx_ts_off: 24,
             log_idx_loglen_off: 32,
             log_idx_logaddr_off: 36,
@@ -754,13 +702,9 @@ pub(crate) const fn ts_layout_64(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 96,
             sec_end1_idx_off: 104,
             sec_end1_stat_off: 112,
-            sec_store_status_size: 24,
-            tsl_status_size: 40,
             uint32_align: 8,
-            time_align: 8,
             log_idx_size: 56,
             log_idx_raw_size: 56,
-            log_idx_status_size: 40,
             log_idx_ts_off: 40,
             log_idx_loglen_off: 48,
             log_idx_logaddr_off: 52,
@@ -777,13 +721,9 @@ pub(crate) const fn ts_layout_64(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 192,
             sec_end1_idx_off: 208,
             sec_end1_stat_off: 224,
-            sec_store_status_size: 48,
-            tsl_status_size: 80,
             uint32_align: 16,
-            time_align: 16,
             log_idx_size: 96,
             log_idx_raw_size: 96,
-            log_idx_status_size: 80,
             log_idx_ts_off: 80,
             log_idx_loglen_off: 88,
             log_idx_logaddr_off: 92,
@@ -800,13 +740,9 @@ pub(crate) const fn ts_layout_64(wg_bits: u32) -> Option<TsLayout> {
             sec_end1_time_off: 384,
             sec_end1_idx_off: 416,
             sec_end1_stat_off: 448,
-            sec_store_status_size: 96,
-            tsl_status_size: 160,
             uint32_align: 32,
-            time_align: 32,
             log_idx_size: 192,
             log_idx_raw_size: 192,
-            log_idx_status_size: 160,
             log_idx_ts_off: 160,
             log_idx_loglen_off: 168,
             log_idx_logaddr_off: 172,
@@ -828,28 +764,6 @@ pub(crate) fn get_u32(buf: &[u8], off: usize) -> u32 {
 #[inline]
 pub(crate) fn put_u32(buf: &mut [u8], off: usize, value: u32) {
     buf[off..off + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-#[inline]
-pub(crate) fn get_i32(buf: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-}
-
-#[inline]
-pub(crate) fn put_i32(buf: &mut [u8], off: usize, value: i32) {
-    buf[off..off + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-#[inline]
-pub(crate) fn get_i64(buf: &[u8], off: usize) -> i64 {
-    let mut b = [0u8; 8];
-    b.copy_from_slice(&buf[off..off + 8]);
-    i64::from_le_bytes(b)
-}
-
-#[inline]
-pub(crate) fn put_i64(buf: &mut [u8], off: usize, value: i64) {
-    buf[off..off + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //! `sector_hdr_data` / `log_idx_data` for `FDB_WRITE_GRAN = 8`,
 //! `fdb_time_t = int32_t`).
 
-use flashdb::{Config, Error, Flash, Tsdb, TslStatus};
+use flashdb::{Config, Error, Tsdb, TslStatus};
 use flashdb_sim::RamFlash;
 
 const SEC_SIZE: u32 = 4096;
@@ -34,7 +34,6 @@ const SEC_END0_TIME_OFF: usize = 11;
 const SEC_END0_IDX_OFF: usize = 15;
 const SEC_END0_STAT_OFF: usize = 19;
 const SEC_END1_TIME_OFF: usize = 24;
-const SEC_END1_IDX_OFF: usize = 28;
 const SEC_END1_STAT_OFF: usize = 32;
 
 /// `log_idx_data` offsets for the same configuration.
@@ -393,4 +392,54 @@ fn works_with_write_granularity_32() {
         Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
     assert_eq!(db.last_time(), 100);
     assert_eq!(db.iter().count(), 100);
+}
+
+/// 64-bit timestamps (`FDB_USING_TIMESTAMP_64BIT`) change the on-flash layout
+/// (56-byte sector header, 24-byte index record at write granularity 8).
+#[test]
+fn works_with_64bit_timestamps() {
+    use flashdb::Tsdb64;
+    const BIG: i64 = 0x1_0000_0000;
+    let mut db: Tsdb64<Nor> =
+        Tsdb64::mount(Nor::new(SEC_SIZE), Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    for i in 0..90 {
+        db.append(BIG + i as i64, &payload(i as usize, 32)).unwrap();
+    }
+    assert_eq!(db.last_time(), BIG + 89);
+    let flash = db.into_flash();
+    let image = flash.data();
+    // sector 0: magic at 3, start_time at 7 (8-byte block)
+    assert_eq!(&image[3..7], &[0x54, 0x53, 0x4C, 0x30]);
+    assert_eq!(i64::from_le_bytes(image[7..15].try_into().unwrap()), BIG);
+    // index record: 24 bytes, status 5 bytes then padding, time at +8
+    let idx = 56usize;
+    assert_eq!(&image[idx..idx + 5], &[0x00, 0x00, 0xFF, 0xFF, 0xFF]);
+    assert_eq!(i64::from_le_bytes(image[idx + 8..idx + 16].try_into().unwrap()), BIG);
+    assert_eq!(get_u32(image, idx + 16), 32);
+    assert_eq!(get_u32(image, idx + 20), SEC_SIZE - 32);
+
+    let mut db: Tsdb64<Nor> =
+        Tsdb64::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    assert_eq!(db.last_time(), BIG + 89);
+    let times: Vec<i64> = db.iter().map(|e| e.unwrap().time).collect();
+    assert_eq!(times.len(), 90);
+    assert_eq!(times[0], BIG);
+    assert_eq!(times[89], BIG + 89);
+    let mut reverse: Vec<i64> = db.iter_reverse().map(|e| e.unwrap().time).collect();
+    reverse.reverse();
+    assert_eq!(reverse, times);
+
+    // A 64-bit database also works at bit-level write granularity.
+    type Nor1 = RamFlash<16384, 1>;
+    let mut db: Tsdb64<Nor1> =
+        Tsdb64::mount(Nor1::new(SEC_SIZE), Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    for i in 0..120 {
+        db.append(BIG + i as i64, &payload(i as usize, 32)).unwrap();
+    }
+    assert_eq!(db.iter().count(), 120);
+    let flash = db.into_flash();
+    let mut db: Tsdb64<Nor1> =
+        Tsdb64::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    assert_eq!(db.last_time(), BIG + 119);
+    assert_eq!(db.iter().count(), 120);
 }

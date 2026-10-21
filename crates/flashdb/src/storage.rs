@@ -62,6 +62,13 @@ impl<F: Flash> Storage<F> {
         if low::kv_layout(F::WRITE_GRAN_BITS).is_none() {
             return Err(Error::UnsupportedWriteGran);
         }
+        if F::ERASED_BYTE != 0xFF {
+            // The on-flash format (magic words, status tables, erased-value
+            // padding) is defined in terms of 0xFF-erased flash, exactly like
+            // FlashDB. Reject drivers that model erased flash differently
+            // instead of silently producing an incompatible format.
+            return Err(Error::InvalidConfig);
+        }
         Ok(Self {
             flash,
             sec_size,
@@ -83,11 +90,6 @@ impl<F: Flash> Storage<F> {
     #[inline]
     pub(crate) fn sector_count(&self) -> u32 {
         self.max_size / self.sec_size
-    }
-
-    #[inline]
-    pub(crate) fn flash(&mut self) -> &mut F {
-        &mut self.flash
     }
 
     #[inline]
@@ -122,20 +124,6 @@ impl<F: Flash> Storage<F> {
     pub(crate) fn erase_sector(&mut self, addr: u32) -> Result<(), F::Error> {
         debug_assert_eq!(addr % self.sec_size, 0);
         self.erase(addr, self.sec_size)
-    }
-
-    /// Read a `u32` stored little endian.
-    #[inline]
-    pub(crate) fn read_u32(&mut self, addr: u32) -> Result<u32, F::Error> {
-        let mut b = [0u8; 4];
-        self.read(addr, &mut b)?;
-        Ok(u32::from_le_bytes(b))
-    }
-
-    /// Write a `u32` stored little endian (single flash write).
-    #[inline]
-    pub(crate) fn write_u32(&mut self, addr: u32, value: u32) -> Result<(), F::Error> {
-        self.write(addr, &value.to_le_bytes())
     }
 
     /// FlashDB's `_fdb_flash_write_align`: write `buf`, padding the final

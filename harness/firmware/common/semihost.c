@@ -116,6 +116,16 @@ void harness_print_result(const struct harness_metrics *m)
     sh_write_u32(m->stack_init);
     sh_write0(" stack_limit=");
     sh_write_u32(m->stack_limit);
+#ifdef HARNESS_STACK_PHASES
+    sh_write0(" st_set=");
+    sh_write_u32(m->st_set);
+    sh_write0(" st_get=");
+    sh_write_u32(m->st_get);
+    sh_write0(" st_iter=");
+    sh_write_u32(m->st_iter);
+    sh_write0(" st_gc=");
+    sh_write_u32(m->st_gc);
+#endif
     sh_write0(" kv_writes=");
     sh_write_u32(m->kv_writes);
     sh_write0(" kv_gets=");

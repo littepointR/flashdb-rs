@@ -16,4 +16,14 @@ uint32_t stack_limit_bytes(void);
  */
 uint32_t stack_high_water_bytes(void);
 
+#ifdef HARNESS_STACK_PHASES
+/*
+ * Repaint the unused part of the stack below the current SP with 0xA5.
+ * Lets the harness measure each workload phase in isolation: call it, run the
+ * phase, then call stack_high_water_bytes().  Only memory below SP is touched,
+ * so live caller frames are preserved.
+ */
+void stack_repaint(void);
+#endif
+
 #endif /* HARNESS_STACK_H */

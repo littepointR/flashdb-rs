@@ -1,7 +1,7 @@
 //! Iteration semantics: forward, reverse and by-time scans, including the
 //! reverse range form (`from > to`) and ranges crossing sector boundaries.
 
-use flashdb::{Config, Flash, Tsdb, TslStatus};
+use flashdb::{Config, Tsdb, TslStatus};
 use flashdb_sim::RamFlash;
 
 const SEC_SIZE: u32 = 4096;
@@ -215,7 +215,6 @@ fn by_time_random_ranges() {
 
 #[test]
 fn by_time_matches_a_filtered_full_scan() {
-    let times = test_times(250);
     let mut db = populated(250);
     let forward: Vec<i32> = collect_forward(&mut db).into_iter().map(|(t, _, _)| t).collect();
     let mut seed = 0xDEAD_BEEFu32;

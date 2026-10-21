@@ -33,6 +33,25 @@ uint32_t stack_limit_bytes(void)
     return (uint32_t)(_estack - _stack_bottom);
 }
 
+#ifdef HARNESS_STACK_PHASES
+/* No code path pushes more than this between reading SP and the paint loop. */
+#define STACK_REPAINT_MARGIN 32u
+
+void stack_repaint(void)
+{
+    uint32_t sp;
+    uint32_t *p;
+    uint32_t *end;
+
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    p = (uint32_t *)_stack_bottom;
+    end = (uint32_t *)(sp - STACK_REPAINT_MARGIN);
+    while (p < end) {
+        *p++ = STACK_PAINT_WORD;
+    }
+}
+#endif /* HARNESS_STACK_PHASES */
+
 uint32_t stack_high_water_bytes(void)
 {
     const uint32_t *p = (const uint32_t *)_stack_bottom;

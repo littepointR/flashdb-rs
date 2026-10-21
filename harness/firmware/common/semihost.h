@@ -46,8 +46,17 @@ struct harness_metrics {
 
     /* Stack measurement, in bytes.  stack_limit is the painted region size. */
     uint32_t stack;        /* worst-case high-water from boot (after init+workload) */
-    uint32_t stack_init;   /* high-water right after database init, before workload */
+    uint32_t stack_init;   /* high-water right after database init, before workload
+                              (= isolated "mount/init" phase peak) */
     uint32_t stack_limit;
+#ifdef HARNESS_STACK_PHASES
+    /* Isolated per-phase peaks from common/stack.c stack_repaint() scans.
+     * Only present in the diagnostic build (`scripts/fw_c.sh --phases`). */
+    uint32_t st_set;
+    uint32_t st_get;
+    uint32_t st_iter;
+    uint32_t st_gc;
+#endif
 
     /* Workload results. */
     uint32_t kv_writes;

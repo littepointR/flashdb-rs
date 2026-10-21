@@ -224,7 +224,16 @@ fn recover(image: &[u8], done: i32) -> Recovered {
             if reformatted {
                 want = vec![next];
             }
-            assert_eq!(committed_after, want, "the appended record must be visible");
+            assert_eq!(
+                committed_after.last().copied(),
+                Some(next),
+                "the appended record must be visible"
+            );
+            // The append may have rolled over, evicting the oldest sector(s):
+            // what remains must be a suffix of the expected window.
+            assert!(committed_after.len() <= want.len());
+            let tail = &want[want.len() - committed_after.len()..];
+            assert_eq!(committed_after, tail, "the appended record must be visible");
             assert_eq!(db.last_time(), next);
         }
         Err(Error::SavedFull) => {
@@ -291,25 +300,15 @@ fn recovers_from_interrupted_end_info_twice() {
     assert_eq!(crash1[SEC_END0_STAT_OFF as usize + 1], 0xFF);
 
     // Remount: the sector is still USING with an interrupted end_info[0].
-    let mut db = Tsdb::mount(Nor::new(SEC_SIZE), config(), MAX_LEN).unwrap();
-    // (reload the crash image into that flash through the DB above)
-    drop(db);
     let mut flash = Nor::new(SEC_SIZE);
     flash.load(&crash1).unwrap();
     let mut db = Tsdb::mount(flash, config(), MAX_LEN).unwrap();
     assert_eq!(db.last_time(), 77);
     assert_eq!(db.iter().count(), 77);
-    // A second power failure during the retried seal hits the very first write
-    // of end_info[1] (status -> PRE_WRITE).
+    // A second power failure during the retried seal: end_info[1].status becomes
+    // PRE_WRITE (1st write) and the timestamp write (2nd write) is torn off.
     let image1 = db.into_flash().data().to_vec();
-    let (crash2, failed) = fault_append(&image1, 1);
-    eprintln!(
-        "DEBUG phase2: failed={failed} end0={:?} end1={:?} status={:?}",
-        &crash2[19..24],
-        &crash2[32..37],
-        &crash2[0..3]
-    );
-    eprintln!("DEBUG image1: end0={:?} end1={:?} status={:?}", &image1[19..24], &image1[32..37], &image1[0..3]);
+    let (crash2, failed) = fault_append(&image1, 2);
     assert!(failed);
     // Both end info slots are now PRE_WRITE: no valid end info pair is left.
     assert_eq!(crash2[SEC_END0_STAT_OFF as usize], 0x00);

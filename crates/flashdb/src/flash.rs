@@ -47,7 +47,7 @@
 //! # }
 //! fn take_borrowed(flash: &mut D) {
 //!     // `&mut D: Flash` because of the blanket impl.
-//!     let _db = flashdb::Kvdb::mount(flash, flashdb::Config::new(4096, 16384), &[]);
+//!     let _db = flashdb::Kvdb::mount(flash, flashdb::Config::new(4096, 16384));
 //! }
 //! ```
 

@@ -51,6 +51,11 @@ const KV_PARTITION_SIZE: u32 = 16 * 1024;
 
 const STACK_PAINT_WORD: u32 = 0xA5A5_A5A5;
 
+/// Bytes below the current SP left untouched by `stack_repaint()`: no code
+/// path pushes more than this between reading SP and the repaint loop.
+#[cfg(feature = "stack-phases")]
+const STACK_REPAINT_MARGIN: usize = 32;
+
 // Semihosting operation numbers (ARM semihosting spec).
 const SYS_WRITE0: u32 = 0x04;
 const SYS_EXIT: u32 = 0x18;
@@ -157,61 +162,63 @@ fn fail(stage: &[u8], code: u32) -> ! {
 
 /* ======================================================================== */
 /* Panic handler                                                            */
+/*                                                                          */
+/* Deliberately minimal: a panic means a firmware bug, and a plain `loop {}` */
+/* keeps core::fmt/panicking machinery out of the image (the C baseline's   */
+/* FDB_ASSERT does the equivalent `while (1);` when logging is compiled     */
+/* out).  A hang is reported by the host script's QEMU timeout.             */
 /* ======================================================================== */
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    write_bytes(b"ERROR stage=panic\nRESULT rc=1\n\0");
-    exit()
+    loop {}
 }
 
 /* ======================================================================== */
-/* Minimal libc replacements (same set as c/libc_stubs.c)                   */
-/* Volatile accesses prevent LLVM from recognising these loops and turning  */
-/* them back into calls to themselves.                                      */
+/* Minimal libc + compiler-builtins overrides                               */
+/*                                                                          */
+/* On ARM, LLVM lowers memcpy/memset/memmove intrinsics to __aeabi_* calls.  */
+/* By default those resolve to compiler-builtins' generic implementations    */
+/* (~1.5 KiB of ROM: memcpy 744 B, __aeabi_memset 220 B, __aeabi_memset4    */
+/* 184 B, __aeabi_memclr4 174 B, __aeabi_memcpy4 156 B, __aeabi_memcpy 12 B).*/
+/* The C baseline links tiny hand-written stubs instead (c/libc_stubs.c,     */
+/* ~230 B of code for the same set), so the Rust firmware supplies strong    */
+/* definitions here: compiler-builtins' symbols are weak and lose.  This is  */
+/* harness-only code -- the library under measurement is unchanged.          */
+/*                                                                          */
+/* Volatile accesses stop LLVM from recognising these loops and turning them */
+/* back into calls to themselves (a classic no_std memcpy pitfall).          */
 /* ======================================================================== */
 
-#[no_mangle]
-pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+#[inline(never)]
+unsafe fn copy_fwd(dst: *mut u8, src: *const u8, n: usize) {
     let mut i = 0;
     while i < n {
         core::ptr::write_volatile(dst.add(i), core::ptr::read_volatile(src.add(i)));
         i += 1;
     }
-    dst
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    if (dst as usize) <= (src as usize) {
-        let mut i = 0;
-        while i < n {
-            core::ptr::write_volatile(dst.add(i), core::ptr::read_volatile(src.add(i)));
-            i += 1;
-        }
-    } else {
-        let mut i = n;
-        while i > 0 {
-            i -= 1;
-            core::ptr::write_volatile(dst.add(i), core::ptr::read_volatile(src.add(i)));
-        }
+#[inline(never)]
+unsafe fn copy_back(dst: *mut u8, src: *const u8, n: usize) {
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        core::ptr::write_volatile(dst.add(i), core::ptr::read_volatile(src.add(i)));
     }
-    dst
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
-    let byte = c as u8;
+#[inline(never)]
+unsafe fn fill(dst: *mut u8, byte: u8, n: usize) {
     let mut i = 0;
     while i < n {
         core::ptr::write_volatile(dst.add(i), byte);
         i += 1;
     }
-    dst
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+#[inline(never)]
+unsafe fn compare(a: *const u8, b: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {
         let va = core::ptr::read_volatile(a.add(i));
@@ -224,9 +231,156 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     0
 }
 
+/* ---- C standard names (memcpy & friends) ------------------------------- */
+
+#[no_mangle]
+pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    copy_fwd(dst, src, n);
+    dst
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    if (dst as usize) <= (src as usize) {
+        copy_fwd(dst, src, n);
+    } else {
+        copy_back(dst, src, n);
+    }
+    dst
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
+    fill(dst, c as u8, n);
+    dst
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    compare(a, b, n)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn bcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
-    memcmp(a, b, n)
+    compare(a, b, n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut n = 0;
+    while core::ptr::read_volatile(s.add(n)) != 0 {
+        n += 1;
+    }
+    n
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
+    let mut i = 0;
+    loop {
+        let ca = core::ptr::read_volatile(a.add(i));
+        let cb = core::ptr::read_volatile(b.add(i));
+        if ca != cb || ca == 0 {
+            return ca as i32 - cb as i32;
+        }
+        i += 1;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+    let mut i = 0;
+    while i < n {
+        let ca = core::ptr::read_volatile(a.add(i));
+        let cb = core::ptr::read_volatile(b.add(i));
+        if ca != cb || ca == 0 {
+            return ca as i32 - cb as i32;
+        }
+        i += 1;
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let mut i = 0;
+    while i < n {
+        let c = core::ptr::read_volatile(src.add(i));
+        core::ptr::write_volatile(dst.add(i), c);
+        if c == 0 {
+            i += 1;
+            while i < n {
+                core::ptr::write_volatile(dst.add(i), 0);
+                i += 1;
+            }
+            break;
+        }
+        i += 1;
+    }
+    dst
+}
+
+/* ---- AAPCS runtime helpers (__aeabi_*): compiler-builtins are weak ----- */
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memcpy(dst: *mut u8, src: *const u8, n: usize) {
+    copy_fwd(dst, src, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memcpy4(dst: *mut u8, src: *const u8, n: usize) {
+    copy_fwd(dst, src, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memcpy8(dst: *mut u8, src: *const u8, n: usize) {
+    copy_fwd(dst, src, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memmove(dst: *mut u8, src: *const u8, n: usize) {
+    memmove(dst, src, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memmove4(dst: *mut u8, src: *const u8, n: usize) {
+    memmove(dst, src, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memmove8(dst: *mut u8, src: *const u8, n: usize) {
+    memmove(dst, src, n);
+}
+
+/* Note the AAPCS argument order: (dest, length, value). */
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memset(dst: *mut u8, n: usize, c: i32) {
+    fill(dst, c as u8, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memset4(dst: *mut u8, n: usize, c: i32) {
+    fill(dst, c as u8, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memset8(dst: *mut u8, n: usize, c: i32) {
+    fill(dst, c as u8, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memclr(dst: *mut u8, n: usize) {
+    fill(dst, 0, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memclr4(dst: *mut u8, n: usize) {
+    fill(dst, 0, n);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __aeabi_memclr8(dst: *mut u8, n: usize) {
+    fill(dst, 0, n);
 }
 
 /* ======================================================================== */
@@ -240,8 +394,16 @@ struct Metrics {
     bss: u32,
     sim_flash: u32,
     stack: u32,
-    stack_init: u32,
+    stack_init: u32,   /* mount/init phase (paint is fresh before main) */
     stack_limit: u32,
+    #[cfg(feature = "stack-phases")]
+    st_set: u32,       /* isolated phase peaks, see stack_diagnostics() */
+    #[cfg(feature = "stack-phases")]
+    st_get: u32,
+    #[cfg(feature = "stack-phases")]
+    st_iter: u32,
+    #[cfg(feature = "stack-phases")]
+    st_gc: u32,
     kv_writes: u32,
     kv_gets: u32,
     kv_iterated: u32,
@@ -263,6 +425,14 @@ impl Metrics {
             stack: 0,
             stack_init: 0,
             stack_limit: 0,
+            #[cfg(feature = "stack-phases")]
+            st_set: 0,
+            #[cfg(feature = "stack-phases")]
+            st_get: 0,
+            #[cfg(feature = "stack-phases")]
+            st_iter: 0,
+            #[cfg(feature = "stack-phases")]
+            st_gc: 0,
             kv_writes: 0,
             kv_gets: 0,
             kv_iterated: 0,
@@ -304,6 +474,28 @@ fn stack_high_water_bytes() -> u32 {
         }
         let used = (top as usize - p as usize) as u32;
         (used + 7) & !7
+    }
+}
+
+/// Repaint the unused part of the stack below the current SP with 0xA5.
+///
+/// Used for per-phase stack attribution: after repainting, a high-water scan
+/// reports the peak of the phase that runs next (plus the live caller frames),
+/// without marks left by earlier phases.  Only memory below the current SP is
+/// touched, so live frames are preserved.
+#[cfg(feature = "stack-phases")]
+#[inline(never)]
+fn stack_repaint() {
+    unsafe {
+        let sp: usize;
+        core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+        let bottom = sym_addr(&_stack_bottom);
+        let end = sp.saturating_sub(STACK_REPAINT_MARGIN);
+        let mut p = bottom;
+        while p < end {
+            core::ptr::write_volatile(p as *mut u32, STACK_PAINT_WORD);
+            p += 4;
+        }
     }
 }
 
@@ -366,17 +558,17 @@ impl Flash for SimFlash {
 
     const WRITE_GRAN_BITS: u32 = 8;
 
+    #[inline(never)]
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
         let (start, _end) = Self::range(addr, buf.len())?;
         let base = Self::base();
-        let mut i = 0;
-        while i < buf.len() {
-            buf[i] = unsafe { core::ptr::read_volatile(base.add(start + i)) };
-            i += 1;
+        unsafe {
+            core::ptr::copy_nonoverlapping(base.add(start), buf.as_mut_ptr(), buf.len());
         }
         Ok(())
     }
 
+    #[inline(never)]
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), Self::Error> {
         Self::range(addr, buf.len())?;
         let base = Self::base();
@@ -393,33 +585,25 @@ impl Flash for SimFlash {
         Ok(())
     }
 
+    #[inline(never)]
     fn erase(&mut self, addr: u32, len: u32) -> Result<(), Self::Error> {
         if addr % SECTOR_SIZE != 0 || len % SECTOR_SIZE != 0 {
             return Err(SimFlashError::UnalignedErase);
         }
         Self::range(addr, len as usize)?;
         let base = Self::base();
-        let start = addr as usize;
-        let mut i = 0;
-        while i < len as usize {
-            unsafe {
-                core::ptr::write_volatile(base.add(start + i), 0xFF);
-            }
-            i += 1;
+        unsafe {
+            core::ptr::write_bytes(base.add(addr as usize), 0xFF, len as usize);
         }
         Ok(())
     }
 }
 
 /// Put the simulated part into its factory-fresh (erased) state.
+#[inline(never)]
 fn sim_flash_erase_all() {
-    let base = SimFlash::base();
-    let mut i = 0;
-    while i < SIM_FLASH_LEN {
-        unsafe {
-            core::ptr::write_volatile(base.add(i), 0xFF);
-        }
-        i += 1;
+    unsafe {
+        core::ptr::write_bytes(SimFlash::base(), 0xFF, SIM_FLASH_LEN);
     }
 }
 
@@ -433,6 +617,7 @@ unsafe impl Sync for DbCell {}
 
 static KV_DB: DbCell = DbCell(UnsafeCell::new(MaybeUninit::uninit()));
 
+#[inline(never)]
 fn kv_mount() {
     sim_flash_erase_all();
     match Kvdb::mount(SimFlash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)) {
@@ -519,6 +704,7 @@ fn fnv1a(mut h: u32, data: &[u8]) -> u32 {
 /* KVDB phase -- real Rust flashdb crate                                    */
 /* ======================================================================== */
 
+#[inline(never)]
 fn kv_phase(m: &mut Metrics) {
     let db = kv();
     let mut key = [0u8; 5];
@@ -621,6 +807,7 @@ fn kv_phase(m: &mut Metrics) {
 /* index, so the iteration pass simply regenerates it.                     */
 /* ======================================================================== */
 
+#[inline(never)]
 fn tsdb_phase_placeholder(m: &mut Metrics) {
     let mut payload = [0u8; TS_PAYLOAD_LEN];
     let mut i = 0u32;
@@ -646,6 +833,75 @@ fn tsdb_phase_placeholder(m: &mut Metrics) {
 /* Entry point                                                              */
 /* ======================================================================== */
 
+/// Per-phase stack attribution.
+///
+/// Runs AFTER the headline scan, so it never changes the reported `stack`
+/// (the stack is repainted between phases, which would otherwise erase the
+/// headline high-water marks).  Each phase is measured from a freshly painted
+/// stack, so the number is that phase's peak plus the live caller frames.
+/// Database state: the full workload has already run, so iteration sees all
+/// 64 keys; the churn phase re-runs the same 1500-write GC pattern.
+#[cfg(feature = "stack-phases")]
+#[inline(never)]
+fn stack_diagnostics(m: &mut Metrics) {
+    let db = kv();
+    let mut key = [0u8; 5];
+    let mut value = [0u8; KV_VALUE_LEN];
+    let mut read_buf = [0u8; KV_VALUE_LEN];
+    let mut iter_buf = [0u8; KV_VALUE_LEN];
+
+    // (b) one set
+    stack_repaint();
+    make_kv_key(&mut key, 0);
+    make_kv_value(&mut value, 0, 0x3000);
+    if db.set(&key, &value).is_err() {
+        fail(b"st_set\0", 0);
+    }
+    m.st_set = stack_high_water_bytes();
+
+    // (c) one get
+    stack_repaint();
+    match db.get(&key, &mut read_buf) {
+        Ok(Some(got)) if got == KV_VALUE_LEN => {}
+        _ => fail(b"st_get\0", 0),
+    }
+    m.st_get = stack_high_water_bytes();
+
+    // (d) full iteration
+    stack_repaint();
+    let mut it = db.iter();
+    let mut n = 0u32;
+    while let Some(entry) = it.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => fail(b"st_iter\0", n),
+        };
+        if it.read_value(&entry, &mut iter_buf).is_err() {
+            fail(b"st_iter_read\0", n);
+        }
+        n += 1;
+    }
+    if n != KV_KEYS {
+        fail(b"st_iter_count\0", n);
+    }
+    m.st_iter = stack_high_water_bytes();
+
+    // (e) GC churn (same write pattern as the measured workload)
+    stack_repaint();
+    n = 0;
+    while n < KV_CHURN {
+        let idx = n % KV_CHURN_KEYS;
+        make_kv_key(&mut key, idx);
+        make_kv_value(&mut value, idx, 0x4000 + n);
+        if db.set(&key, &value).is_err() {
+            fail(b"st_gc\0", n);
+        }
+        n += 1;
+    }
+    m.st_gc = stack_high_water_bytes();
+}
+
+#[inline(never)]
 fn print_result(m: &Metrics) {
     write_bytes(b"RESULT text=\0");
     write_u32(m.text);
@@ -663,6 +919,17 @@ fn print_result(m: &Metrics) {
     write_u32(m.stack_init);
     write_bytes(b" stack_limit=\0");
     write_u32(m.stack_limit);
+    #[cfg(feature = "stack-phases")]
+    {
+        write_bytes(b" st_set=\0");
+        write_u32(m.st_set);
+        write_bytes(b" st_get=\0");
+        write_u32(m.st_get);
+        write_bytes(b" st_iter=\0");
+        write_u32(m.st_iter);
+        write_bytes(b" st_gc=\0");
+        write_u32(m.st_gc);
+    }
     write_bytes(b" kv_writes=\0");
     write_u32(m.kv_writes);
     write_bytes(b" kv_gets=\0");
@@ -699,6 +966,10 @@ pub extern "C" fn main() -> ! {
 
     // Final scan after both phases have returned to this shallow frame.
     m.stack = stack_high_water_bytes();
+
+    // Per-phase attribution (does not affect m.stack: repaints happen after).
+    #[cfg(feature = "stack-phases")]
+    stack_diagnostics(&mut m);
 
     print_result(&m);
     exit()
