@@ -289,6 +289,21 @@ Build profiles:
 5. **Phase boundaries marked `#[inline(never)]`** so LTO cannot union the
    workload phases' locals into one giant `main` frame: release stack
    2,312 B → 2,000 B (**−312 B**) for +16 B of ROM.
+6. **Error-plumbing / loop de-duplication + table-driven RESULT printing**
+   (the "harness ROM pass"). One cold `fail()` path with shared stage tags and
+   `ok_or_fail()` instead of per-site `match`/`fail` sequences; shared
+   `kv_put()` / `kv_get_verified()` helpers instead of three inlined KV set
+   loops; `#[repr(C)] Metrics` printed by one loop over a label table instead
+   of 16 expanded `write_bytes`+`write_u32` pairs. Measured against a frozen
+   crate snapshot (HEAD harness vs final harness, both `--profile size`):
+   `.text` 14,524 → 14,324 B, `.rodata` 1,392 → 1,520 B, ROM 15,916 → 15,844 B
+   (−72 B); release profile 17,464 → 17,340 B (−124 B); stack unchanged,
+   checksums unchanged. Modest because ~2.5 KiB of the reported "harness"
+   bucket is crate mount/append code that LTO inlined into the harness
+   wrappers (measured by forcing those calls through opaque `black_box`
+   function pointers: harness bucket 6,456 → 3,880 B, crate 7,396 → 10,434 B,
+   total ROM +476 B). Forcing the separation is therefore not a ROM win; the
+   right fix is crate-side de-inlining.
 
 The firmware provides `_start`-style startup from the shared
 `common/startup_armv7m.S` via `core::arch::global_asm!(include_str!(...))`, the
@@ -348,15 +363,15 @@ Cross-implementation checksums are identical (`kv_checksum 0x4b3486a4`,
 
 | metric | C FlashDB | Rust release (`s`) | Rust size (`z`) |
 |---|---|---|---|
-| `.text` | 9720 | 17364 | 15624 |
-| `.rodata` | 1632 | 1492 | 1492 |
+| `.text` | 9720 | 15728 | 14220 |
+| `.rodata` | 1632 | 1520 | 1520 |
 | `.data` | 56 | 0 | 0 |
-| ROM total | **11408** | **18856** | **17116** |
-| `.bss` | 1008 | 696 | 696 |
-| static RAM | **1064** | **696** | **696** |
+| ROM total | **11408** | **17248** | **15740** |
+| `.bss` | 1008 | 624 | 624 |
+| static RAM | **1064** | **624** | **624** |
 | simulated NOR (excluded) | 32768 | 32768 | 32768 |
-| stack high-water | **1192** | **2016** | **2064** |
-| static+stack RAM | **2256** | **2712** | **2760** |
+| stack high-water | **1192** | **1312** | **1432** |
+| static+stack RAM | **2256** | **1936** | **2056** |
 | stack limit | 8192 | 8192 | 8192 |
 | KV writes / gets / iterated | 1596 / 64 / 64 | same | same |
 | KV checksum | `0x4b3486a4` | `0x4b3486a4` | `0x4b3486a4` |
@@ -365,43 +380,51 @@ Cross-implementation checksums are identical (`kv_checksum 0x4b3486a4`,
 | TS checksum | `0x10d90680` | `0x10d90680` | `0x10d90680` |
 
 Diagnostic (`--phases`) builds are larger by construction and are not part of
-the comparison: C ROM 12032, Rust release ROM 20580, Rust size ROM 18488.
+the comparison: C ROM 12032, Rust release ROM 19112, Rust size ROM 17416.
+
+> Snapshot note: this table is from the current `crates/flashdb` working tree
+> during the parallel crate optimisation pass (the crate was still being
+> edited and was briefly uncompilable mid-edit; the harness itself is
+> unchanged by that). Refresh with `./scripts/fw_rust.sh` after the crate work
+> lands — the harness code is final for this round.
 
 ### Per-phase stack (bytes, `--phases` builds)
 
 | phase | C | Rust release | Rust size |
 |---|---|---|---|
-| mount/init (`stack_init`) | 752 | 2040 | 2088 |
-| one KV set | 736 | 968 | 1000 |
-| one KV get | 720 | 1064 | 1056 |
-| full KV iteration | 560 | 800 | 856 |
-| KV GC churn (1500 writes) | 1248 | 1480 | 1552 |
-| one TS append | 528 | 688 | 752 |
-| full TS iteration | 568 | 792 | 816 |
-| headline `stack` (max) | 1192 | 2016 | 2064 |
+| mount/init (`stack_init`) | 752 | 912 | 952 |
+| one KV set | 736 | 952 | 984 |
+| one KV get | 720 | 1056 | 1048 |
+| full KV iteration | 560 | 784 | 856 |
+| KV GC churn (1500 writes) | 1248 | 1424 | 1528 |
+| one TS append | 528 | 680 | 728 |
+| full TS iteration | 568 | 792 | 800 |
+| headline `stack` (max) | 1192 | 1400 | 1504 |
 
-Reading: C peaks in GC churn (1,248 B); Rust peaks in database mount
-(≈2,040 B). Every per-operation phase is 150–350 B deeper in Rust, and mount
-alone accounts for most of the gap. Per-phase numbers include each firmware's
-diagnostic frame (~100–300 B, present on both sides), so compare the deltas.
+Reading: C peaks in GC churn (1,248 B); Rust peaks in the diagnostic run's GC
+churn too (1,400–1,528 B); per-operation phases are 100–300 B deeper in Rust.
+The headline `stack` values above (1,312 B release / 1,432 B size) come from
+the non-diagnostic build. Per-phase numbers include each firmware's diagnostic
+frame (~100–300 B, present on both sides), so compare the deltas.
 
 ### ROM attribution (bucketed code symbols)
 
 | bucket | C | Rust release (`s`) | Rust size (`z`) |
 |---|---|---|---|
-| library code | 7674 (FlashDB/FAL, KV+TS) | 10098 (flashdb, KV+TS) | 8546 (flashdb, KV+TS) |
-| harness code | 2030 | 7190¹ | 6560¹ |
-| core/panic + outliner stubs | – | 30 | 456 |
+| library code | 7674 (FlashDB/FAL, KV+TS) | ~7.4 KiB (flashdb, KV+TS) | 7396 (flashdb, KV+TS) |
+| harness code | 2030 | ~6.6 KiB¹ | 6364¹ |
+| core/panic + outliner stubs | – | ~0.4 KiB | 408 |
 | toolchain mem helpers | – (inside harness/libgcc) | 138 | 138 |
-| `.text` (size -A) | 9720 | 17364 | 15624 |
+| `.text` (size -A) | 9720 | 15728 | 14220 |
 
-¹ heavily inflated by crate code that LTO inlined into the harness's phase
-wrappers: `tsdb_phase` is 2,224 B (crate append/write path inlined, vs 170 B
-for the old placeholder) and `ts_mount` 1,186 B (crate mount inlined), plus
-`kv_mount` 1,278 B / `kv_phase` 1,256 B. The crate's own named symbols are
-therefore ~3–4 KiB of the "harness" bucket; de-inlining the large crate
-helpers should move that back into the crate column without changing the total
-(and may reduce it).
+¹ inflated by crate code that LTO inlined into the harness's phase wrappers
+(`tsdb_phase` ~1.8 KiB, `ts_mount` ~1.2 KiB, `kv_mount` ~1.0 KiB include the
+crate mount/append bodies). An opaque-call-boundary experiment puts the
+genuine harness code at ~3.9 KiB: harness bucket 6,456 → 3,880 B while crate
+goes 7,396 → 10,434 B and total ROM grows by 476 B. So roughly 2.5 KiB of the
+"harness" column is crate code awaiting crate-side de-inlining, and the
+remaining ~3.9 KiB is the real harness floor (workload verification, error
+plumbing, print path, NOR driver, startup).
 
 ### What is harness-side vs crate-side (KV+TS baseline)
 
@@ -409,14 +432,16 @@ Harness-side work is unchanged from the KV-only measurements above
 (mem overrides, minimal panic, out-of-line driver, feature-gated diagnostics,
 `#[inline(never)]` phase boundaries). The remaining gap is crate-side:
 
-* **TSDB real cost is the big new number.** Adding the real Rust TSDB to the
-  same workload grew ROM from 12,660 B to 18,856 B (+6,196 B: crate symbols
-  +2,978 B, crate code inlined into `tsdb_phase`/`ts_mount` +3,218 B). For
-  comparison, C's `fdb_tsdb.o` is 2,742 B before `--gc-sections` (≈2.4 KiB in
-  the final image). This is the main thing to optimise for the KV+TS target.
-* **KVDB code** is still ~0.5–0.9 KiB above C's KV-equivalent slice for the
-  same feature subset (GC +532, find +484, move +214, value read +134 vs the
-  C counterparts; see the KV-only discussion earlier and `--symbols`).
+* **Crate vs C library.** After the crate optimisation pass so far, the named
+  crate symbols (7,396 B, KV+TS) are *below* C's FlashDB/FAL library symbols
+  (7,674 B), but ~2.5 KiB of crate mount/append code is accounted to the
+  harness bucket because LTO inlines it into the harness wrappers. The total
+  ROM gap is therefore mostly (a) that inlined crate code + genuine Rust
+  harness (~3.9 KiB) versus C's 2.0 KiB harness, plus (b) Rust runtime
+  baseline (`core`/panic/slice helpers/outliner ~0.4 KiB).
+* **Stack** is now much closer (release 1,312 B vs C 1,192 B; the KVDB
+  placement API `Kvdb::mount_into` removed the mount by-value copy). Remaining
+  per-phase deltas are 100–300 B and come from crate call depth.
 * **Stack**: Rust mount ≈2,040 B vs C 752 B; per-op phases +150–350 B. The
   crate `mount` frames (KV and TS) dominate; candidate causes are the
   per-call scratch buffers and the inlined write paths. Crate-side

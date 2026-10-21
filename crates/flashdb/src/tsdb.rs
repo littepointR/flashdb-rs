@@ -229,6 +229,12 @@ enum IterMode<T: Timestamp> {
     ByTime { from: T, to: T },
 }
 
+/// Per-mode stepping function used by [`TslIterator::next`].
+#[allow(type_alias_bounds)] // the bound is needed to name `F::Error`
+type NextFn<'a, F: Flash, T> = for<'b> fn(
+    &'b mut TslIterator<'a, F, T>,
+) -> Option<Result<TslEntry<T>, F::Error>>;
+
 /// Iterator over the entries of a [`Tsdb`].
 ///
 /// Created by [`TsdbImpl::iter`], [`TsdbImpl::iter_reverse`] or
@@ -237,6 +243,12 @@ enum IterMode<T: Timestamp> {
 pub struct TslIterator<'a, F: Flash, T: Timestamp = i32> {
     db: &'a mut TsdbImpl<F, T>,
     mode: IterMode<T>,
+    /// Stepping function for this iterator's mode. Storing the function
+    /// pointer (instead of a runtime `match` in `Iterator::next`) lets a
+    /// `no_std` build drop the modes it never constructs; this is the compact
+    /// default. With the `fast-iter` feature the dispatch is a direct match.
+    #[cfg(not(feature = "fast-iter"))]
+    next: NextFn<'a, F, T>,
     /// Sector to read next (or [`FAILED_ADDR`] when there is none).
     sector_addr: u32,
     /// Sectors traversed so far, used to stop after a full round.
@@ -402,17 +414,23 @@ fn decode_sector_header<T: Timestamp>(
         TSL_STATUS_NUM,
         &raw[layout.sec_end0_stat_off as usize..],
     ));
-    sec.end_info_stat[1] = TslStatus::from_index(decode_status(
-        wg,
-        TSL_STATUS_NUM,
-        &raw[layout.sec_end1_stat_off as usize..],
-    ));
     if sec.end_info_stat[0] == TslStatus::Write {
         sec.end_time = T::read_le(raw, layout.sec_end0_time_off as usize);
         sec.end_idx = get_u32(raw, layout.sec_end0_idx_off as usize);
-    } else if sec.end_info_stat[1] == TslStatus::Write {
-        sec.end_time = T::read_le(raw, layout.sec_end1_time_off as usize);
-        sec.end_idx = get_u32(raw, layout.sec_end1_idx_off as usize);
+        /* end_info[1] is only the recovery fallback slot for an interrupted
+         * end_info[0] write; a sector is always formatted before being reused,
+         * so both slots can never hold a valid end node at the same time. */
+        sec.end_info_stat[1] = TslStatus::Unused;
+    } else {
+        sec.end_info_stat[1] = TslStatus::from_index(decode_status(
+            wg,
+            TSL_STATUS_NUM,
+            &raw[layout.sec_end1_stat_off as usize..],
+        ));
+        if sec.end_info_stat[1] == TslStatus::Write {
+            sec.end_time = T::read_le(raw, layout.sec_end1_time_off as usize);
+            sec.end_idx = get_u32(raw, layout.sec_end1_idx_off as usize);
+        }
     }
     sec
 }
@@ -542,6 +560,9 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
 
         /* Check all sector headers (fdb_tsdb_init + check_sec_hdr_cb). */
         let mut check_failed = false;
+        /* Address of the USING/first-EMPTY sector chosen as current, or
+         * FAILED_ADDR when there is none yet. */
+        let mut cur_addr = FAILED_ADDR;
         let mut empty_num = 0usize;
         let mut empty_addr = 0u32;
         /* Newest FULL sector (largest end timestamp). Only used when a
@@ -549,13 +570,9 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
          * physical sector, which is wrong after an interrupted wrap. */
         let mut latest_full_addr = FAILED_ADDR;
         let mut latest_full_time = T::default();
-        let mut latest_full_info = SecInfo::default();
-        /* The last sector read by the check loop is always the last physical
-         * sector; the check loop result can be reused for the final
-         * read_sector_info() of the current sector instead of reading flash
-         * twice. No write happens in between, so both are identical. */
-        let mut last_sector_info = SecInfo::default();
-        let mut cur_sector_info = SecInfo::default();
+        /* Address whose decoded header is currently held in `cur_sec` because
+         * the check loop visited it last (see below); FAILED_ADDR when unset. */
+        let mut cached_cur_addr = FAILED_ADDR;
         let mut addr = 0u32;
         let mut traversed_len = 0u32;
         loop {
@@ -564,15 +581,12 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
              * once more (with traversal) when the status filter matches. */
             let _ = self.read_sector_info(addr, false)?;
             let sec = self.read_sector_info(addr, true)?;
-            if sec.addr == max_size - sec_size {
-                last_sector_info = sec;
-            }
             if !sec.check_ok {
                 check_failed = true;
                 break;
             } else if sec.status == SectorStoreStatus::Using {
-                if self.cur_sec.addr == FAILED_ADDR {
-                    self.cur_sec = sec;
+                if cur_addr == FAILED_ADDR {
+                    cur_addr = sec.addr;
                 } else {
                     /* multiple sectors are in use: the DB is damaged */
                     check_failed = true;
@@ -581,16 +595,23 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             } else if sec.status == SectorStoreStatus::Empty {
                 empty_num += 1;
                 empty_addr = sec.addr;
-                if empty_num == 1 && self.cur_sec.addr == FAILED_ADDR {
-                    self.cur_sec = sec;
+                if empty_num == 1 && cur_addr == FAILED_ADDR {
+                    cur_addr = sec.addr;
                 }
             } else if sec.status == SectorStoreStatus::Full && sec.end_time > latest_full_time {
                 latest_full_time = sec.end_time;
                 latest_full_addr = sec.addr;
-                latest_full_info = sec;
             }
-            if self.cur_sec.addr == sec.addr {
-                cur_sector_info = sec;
+            if sec.addr == max_size - sec_size && cur_addr == FAILED_ADDR {
+                /* The last sector read by the check loop is always the last
+                 * physical sector. Keep its decoded header (in cur_sec, which is
+                 * still unset here) so that the final read_sector_info() below
+                 * can reuse it: the common fully populated, rollover-disabled
+                 * case saves one flash read. No write happens in between, so
+                 * both reads would be identical. */
+                self.cur_sec = sec;
+                cached_cur_addr = sec.addr;
+                /* not the current sector: only its header is cached */
             }
             match next_sector_addr(sec.addr, traversed_len, sec_size, max_size) {
                 Some(next) => addr = next,
@@ -604,28 +625,29 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             /* fdb_tsdb_init reads the current sector once more after formatting. */
             self.cur_sec = self.read_sector_info(0, true)?;
         } else {
+            let mut cur_addr = cur_addr;
             let latest_addr = if empty_num > 0 {
                 empty_addr
-            } else if self.cur_sec.addr == FAILED_ADDR {
+            } else if cur_addr == FAILED_ADDR {
                 /* Every sector is full (rollover disabled, or a power failure
                  * right at the wrap). C reads an invalid current sector here.
                  * Use the sector with the newest end info, falling back to the
                  * last physical sector. */
-                let addr = if latest_full_addr != FAILED_ADDR {
+                if latest_full_addr != FAILED_ADDR {
                     latest_full_addr
                 } else {
                     max_size - sec_size
-                };
-                self.cur_sec.addr = addr;
-                addr
+                }
             } else if self.rollover {
-                self.cur_sec.addr
+                cur_addr
             } else {
                 /* There is no empty sector. */
-                let addr = max_size - sec_size;
-                self.cur_sec.addr = addr;
-                addr
+                cur_addr = max_size - sec_size;
+                cur_addr
             };
+            if cur_addr == FAILED_ADDR {
+                cur_addr = latest_addr;
+            }
             /* db->cur_sec is the latest sector, the next one is the oldest. */
             self.storage.oldest_addr = if latest_addr + sec_size >= max_size {
                 0
@@ -633,21 +655,10 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
                 latest_addr + sec_size
             };
 
-            let cur_addr = self.cur_sec.addr;
             /* Reuse the header already decoded by the check loop (see above). */
-            let cached = if cur_addr == max_size - sec_size {
-                Some(last_sector_info)
-            } else if cur_addr == latest_full_addr {
-                Some(latest_full_info)
-            } else if cur_addr == cur_sector_info.addr {
-                Some(cur_sector_info)
-            } else {
-                None
-            };
-            self.cur_sec = match cached {
-                Some(sec) => sec,
-                None => self.read_sector_info(cur_addr, true)?,
-            };
+            if cached_cur_addr != cur_addr {
+                self.cur_sec = self.read_sector_info(cur_addr, true)?;
+            }
             /* Recover the last saved timestamp (fdb_tsdb_init). */
             match self.cur_sec.status {
                 SectorStoreStatus::Using => {
@@ -668,7 +679,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
                 }
                 SectorStoreStatus::Empty => {
                     if self.storage.oldest_addr != self.cur_sec.addr {
-                        self.last_time = self.read_previous_sector_end(cur_addr)?;
+                        self.last_time = self.read_previous_sector_end(self.cur_sec.addr)?;
                     }
                 }
                 SectorStoreStatus::Unused => {}
@@ -727,6 +738,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         TslIterator {
             db: self,
             mode: IterMode::Forward,
+            #[cfg(not(feature = "fast-iter"))]
+            next: TslIterator::next_forward,
             sector_addr: start,
             traversed_len: 0,
             next_index: 0,
@@ -744,6 +757,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         TslIterator {
             db: self,
             mode: IterMode::Reverse,
+            #[cfg(not(feature = "fast-iter"))]
+            next: TslIterator::next_reverse,
             sector_addr: start,
             traversed_len: 0,
             next_index: 0,
@@ -766,6 +781,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         TslIterator {
             db: self,
             mode: IterMode::ByTime { from, to },
+            #[cfg(not(feature = "fast-iter"))]
+            next: TslIterator::next_by_time_entry,
             sector_addr: start,
             traversed_len: 0,
             next_index: 0,
@@ -1184,13 +1201,20 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         let len_off = (layout.log_idx_loglen_off - ts_off) as usize;
         let addr_off = (layout.log_idx_logaddr_off - ts_off) as usize;
         let block_len = (layout.log_idx_raw_size - ts_off) as usize;
-        let mut block = [F::ERASED_BYTE; MAX_ALIGN];
-        debug_assert!(block_len <= block.len());
-        time.write_le(&mut block, 0);
-        put_u32(&mut block, len_off, data.len() as u32);
-        put_u32(&mut block, addr_off, log_addr);
-        self.storage
-            .write(idx_addr + ts_off, &block[..block_len])?;
+        if wg <= 32 {
+            /* the written index tail is at most 16 B at WG<=32 */
+            let mut block = [F::ERASED_BYTE; 16];
+            time.write_le(&mut block, 0);
+            put_u32(&mut block, len_off, data.len() as u32);
+            put_u32(&mut block, addr_off, log_addr);
+            self.storage.write(idx_addr + ts_off, &block[..block_len])?;
+        } else {
+            let mut block = [F::ERASED_BYTE; MAX_ALIGN];
+            time.write_le(&mut block, 0);
+            put_u32(&mut block, len_off, data.len() as u32);
+            put_u32(&mut block, addr_off, log_addr);
+            self.storage.write(idx_addr + ts_off, &block[..block_len])?;
+        }
         /* write the blob data */
         self.storage.write_align(log_addr, data)?;
         /* write the status by write granularity */
@@ -1295,9 +1319,40 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
         }
     }
 
-    /// Forward or reverse iteration over every entry (`fdb_tsl_iter`,
-    /// `fdb_tsl_iter_reverse`).
-    fn next_direction(&mut self, forward: bool) -> Option<Result<TslEntry<T>, F::Error>> {
+    /// Advance the forward iterator to the next sector that has entries.
+    /// Returns `false` when the whole ring has been traversed.
+    #[inline(never)]
+    fn advance_forward(&mut self) -> Result<bool, F::Error> {
+        if self.sector_addr == FAILED_ADDR {
+            self.done = true;
+            return Ok(false);
+        }
+        let sec_addr = self.sector_addr;
+        let sec_size = self.db.storage.sec_size();
+        let max_size = self.db.storage.max_size();
+        self.traversed_len = self.traversed_len.saturating_add(sec_size);
+        let sec = self.db.read_sector_info(sec_addr, false)?;
+        self.sector_addr = next_sector_addr(sec.addr, self.traversed_len, sec_size, max_size)
+            .unwrap_or(FAILED_ADDR);
+        if sec.status == SectorStoreStatus::Using || sec.status == SectorStoreStatus::Full {
+            let sec = if sec.status == SectorStoreStatus::Using {
+                /* copy the current using sector's RAM status */
+                self.db.cur_sec
+            } else {
+                sec
+            };
+            let layout = self.db.lay();
+            if sector_has_entries(&sec, layout.sec_hdr_size) {
+                self.next_index = sec.addr + layout.sec_hdr_size;
+                self.sec = sec;
+                self.in_sector = true;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Forward iteration over every entry (`fdb_tsl_iter`).
+    fn next_forward(&mut self) -> Option<Result<TslEntry<T>, F::Error>> {
         loop {
             if self.done {
                 return None;
@@ -1305,11 +1360,42 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
             if self.in_sector {
                 let index = self.next_index;
                 let layout = self.db.lay();
-                let next = if forward {
-                    next_tsl_addr(&self.sec, index, layout.log_idx_size)
-                } else {
-                    prev_tsl_addr(&self.sec, index, layout.log_idx_size, layout.sec_hdr_size)
-                };
+                match next_tsl_addr(&self.sec, index, layout.log_idx_size) {
+                    Some(next) => self.next_index = next,
+                    None => self.in_sector = false,
+                }
+                match self.read_entry(index) {
+                    None => continue,
+                    Some(Err(e)) => return Some(Err(e)),
+                    Some(Ok(entry)) => return Some(Ok(entry)),
+                }
+            }
+            match self.advance_forward() {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
+
+    /// Reverse iteration over every entry (`fdb_tsl_iter_reverse`).
+    fn next_reverse(&mut self) -> Option<Result<TslEntry<T>, F::Error>> {
+        loop {
+            if self.done {
+                return None;
+            }
+            if self.in_sector {
+                let index = self.next_index;
+                let layout = self.db.lay();
+                let next = prev_tsl_addr(
+                    &self.sec,
+                    index,
+                    layout.log_idx_size,
+                    layout.sec_hdr_size,
+                );
                 match next {
                     Some(next) => self.next_index = next,
                     None => self.in_sector = false,
@@ -1336,12 +1422,8 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                     return Some(Err(e));
                 }
             };
-            self.sector_addr = if forward {
-                next_sector_addr(sec.addr, self.traversed_len, sec_size, max_size)
-            } else {
-                prev_sector_addr(sec.addr, self.traversed_len, sec_size, max_size)
-            }
-            .unwrap_or(FAILED_ADDR);
+            self.sector_addr = prev_sector_addr(sec.addr, self.traversed_len, sec_size, max_size)
+                .unwrap_or(FAILED_ADDR);
 
             if sec.status == SectorStoreStatus::Using || sec.status == SectorStoreStatus::Full {
                 let sec = if sec.status == SectorStoreStatus::Using {
@@ -1352,11 +1434,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                 };
                 let layout = self.db.lay();
                 if sector_has_entries(&sec, layout.sec_hdr_size) {
-                    self.next_index = if forward {
-                        sec.addr + layout.sec_hdr_size
-                    } else {
-                        sec.end_idx
-                    };
+                    self.next_index = sec.end_idx;
                     self.sec = sec;
                     self.in_sector = true;
                 }
@@ -1365,6 +1443,14 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
              * in both directions. C's reverse iterator stops at the first
              * sector without data, which misses older data when a power
              * failure left an unused sector before it. */
+        }
+    }
+
+    /// Entry point for [`IterMode::ByTime`] iteration.
+    fn next_by_time_entry(&mut self) -> Option<Result<TslEntry<T>, F::Error>> {
+        match self.mode {
+            IterMode::ByTime { from, to } => self.next_by_time(from, to),
+            IterMode::Forward | IterMode::Reverse => None,
         }
     }
 
@@ -1481,10 +1567,18 @@ impl<'a, F: Flash, T: Timestamp> Iterator for TslIterator<'a, F, T> {
     type Item = Result<TslEntry<T>, F::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.mode {
-            IterMode::Forward => self.next_direction(true),
-            IterMode::Reverse => self.next_direction(false),
-            IterMode::ByTime { from, to } => self.next_by_time(from, to),
+        #[cfg(not(feature = "fast-iter"))]
+        {
+            let next = self.next;
+            next(self)
+        }
+        #[cfg(feature = "fast-iter")]
+        {
+            match self.mode {
+                IterMode::Forward => self.next_forward(),
+                IterMode::Reverse => self.next_reverse(),
+                IterMode::ByTime { from, to } => self.next_by_time(from, to),
+            }
         }
     }
 }

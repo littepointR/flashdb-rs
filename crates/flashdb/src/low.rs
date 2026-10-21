@@ -167,9 +167,13 @@ impl TslStatus {
 // CRC32 (identical polynomial/algorithm to `fdb_calc_crc32`)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "small-crc"))]
 /// CRC32 lookup table, generated at compile time (no runtime init, no RAM).
+/// 256 entries = 1 KiB of `.rodata`, the same as FlashDB-C's table; this keeps
+/// CRC throughput equal to C, which matters for large values.
 const CRC32_TABLE: [u32; 256] = build_crc32_table();
 
+#[cfg(not(feature = "small-crc"))]
 const fn build_crc32_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i = 0;
@@ -186,25 +190,52 @@ const fn build_crc32_table() -> [u32; 256] {
     table
 }
 
+#[cfg(feature = "small-crc")]
+/// 16-entry nibble table: 64 bytes of `.rodata` instead of 1 KiB, at roughly
+/// twice the CRC CPU cost.
+const CRC32_TABLE: [u32; 16] = build_crc32_table();
+
+#[cfg(feature = "small-crc")]
+const fn build_crc32_table() -> [u32; 16] {
+    let mut table = [0u32; 16];
+    let mut i = 0;
+    while i < 16 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 4 {
+            crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+            bit += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+}
+
 /// Calculate a chained CRC32, matching `fdb_calc_crc32(crc, buf, size)`.
 ///
 /// Pass `crc = 0` for the first chunk and feed the previous return value for
 /// subsequent chunks.
+#[cfg(not(feature = "small-crc"))]
 #[inline]
 pub fn crc32(mut crc: u32, data: &[u8]) -> u32 {
     crc = !crc;
     let mut i = 0;
-    // Unroll by four: still one table, noticeably fewer loop branches.
-    while i + 4 <= data.len() {
-        crc = CRC32_TABLE[((crc ^ data[i] as u32) & 0xFF) as usize] ^ (crc >> 8);
-        crc = CRC32_TABLE[((crc ^ data[i + 1] as u32) & 0xFF) as usize] ^ (crc >> 8);
-        crc = CRC32_TABLE[((crc ^ data[i + 2] as u32) & 0xFF) as usize] ^ (crc >> 8);
-        crc = CRC32_TABLE[((crc ^ data[i + 3] as u32) & 0xFF) as usize] ^ (crc >> 8);
-        i += 4;
-    }
     while i < data.len() {
         crc = CRC32_TABLE[((crc ^ data[i] as u32) & 0xFF) as usize] ^ (crc >> 8);
         i += 1;
+    }
+    !crc
+}
+
+#[cfg(feature = "small-crc")]
+#[inline]
+pub fn crc32(mut crc: u32, data: &[u8]) -> u32 {
+    crc = !crc;
+    for &b in data {
+        crc ^= b as u32;
+        crc = (crc >> 4) ^ CRC32_TABLE[(crc & 0x0F) as usize];
+        crc = (crc >> 4) ^ CRC32_TABLE[(crc & 0x0F) as usize];
     }
     !crc
 }

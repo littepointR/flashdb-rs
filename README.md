@@ -52,9 +52,9 @@ internals are Rust-native:
   (`Kvdb<F>` / `Tsdb<F, T>`), instead of a FAL registry and a global lock.
   Implement the `Flash` trait for a partition view and pass it in.
 * **No heap, no global state.** `#![no_std]`, all buffers are stack or
-  caller-provided. The crate is `#![deny(unsafe_code)]` with exactly one
-  audited exception: placement initialization (`mount_into`) so that a
-  database stored in a `static` (the normal MCU pattern) needs no stack copy.
+  caller-provided. The crate is `#![deny(unsafe_code)]` with two audited placement-initializer
+  functions (`Kvdb::mount_into`, `Tsdb::mount_into`) so that a database stored
+  in a `static` (the normal MCU pattern) needs no stack copy.
 * **Typed errors.** `Error<E>` carries the flash driver's own error and says
   which operation failed; no `FDB_ASSERT` busy-loop, no error codes lost.
 * **Iterators instead of callbacks.** KV and TS iteration are real
@@ -126,6 +126,29 @@ The benchmarks use a RAM-backed NOR simulator with exact NOR semantics
 (program only clears bits, erase sets `0xFF`) and count every flash
 read/write/erase and byte, so results are comparable across machines and
 meaningful for real flash.
+
+## Measured results
+
+Benchmarked against FlashDB-C with identical workloads and a counting NOR
+simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+| metric (Cortex-M3, same workload) | C FlashDB | Rust |
+|---|---:|---:|
+| ROM (`-Os` vs `-z`) | 11 408 B | 14 624 B (13 664 B with `small-crc`; ≈12.1 KiB best nightly size build) |
+| static RAM | 1 064 B | **624 B** |
+| static + stack RAM | 2 256 B | **2 056 B** |
+| KV flash reads (hot get / miss / update / iterate) | 6 000 / 159 / 11.1 / 15.9 per op | **4 / 37 / 8.0 / 6.9** |
+| TS flash reads / writes / erases | identical to C in every scenario | identical |
+| host CPU | baseline | faster in 12/16 scenarios in the default build; all 16 with `--features fast-iter` |
+
+All scenarios produce identical logical checksums, and Rust-written and
+C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. ROM is the
+one metric not yet at parity; the remaining gap is Rust bounds/runtime/harness
+overhead, and the size levers above are documented in `docs/BENCHMARKS.md`.
+
+Two per-DB build options are available for size/CPU trade-offs:
+`--features small-crc` (64-byte CRC table, −960 B ROM) and
+`--features fast-iter` (direct TS iterator dispatch, faster CPU, +~1 KiB ROM).
 
 ## License
 

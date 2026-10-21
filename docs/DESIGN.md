@@ -18,9 +18,10 @@ docs in `crates/flashdb/src/*.rs` cover the details of each algorithm.
    The crate is `#![no_std] #![deny(unsafe_code)]`; all buffers are stack or
    caller-provided; a database *owns* its flash view (`Kvdb<F>`), so several
    databases/drivers can coexist without a FAL-style global registry or lock.
-   The single audited `unsafe` block is the placement initializer
-   (`mount_into`), which writes every field of a database exactly once into a
-   caller-provided `MaybeUninit` so a `static` database costs no stack copy.
+   The only audited `unsafe` code is the two placement initializers
+   (`Kvdb::mount_into`, `Tsdb::mount_into`), which write every field of a
+   database exactly once into a caller-provided `MaybeUninit` so a `static`
+   database costs no stack copy.
    Everything above it (parsing, CRC, GC, recovery, iterators) is safe code.
 4. **Rust-native API.** `Result` with the driver's own error type, iterators
    instead of callbacks, compile-time configuration, typed statuses.
@@ -245,7 +246,22 @@ The design targets both:
 | CRC32 table generated at compile time (`const fn`) | no RAM cost, 1 KiB `.rodata` like C |
 | `#[inline(always)]` layout accessors | zero-cost write-granularity specialisation |
 
-Numbers and methodology are in `docs/BENCHMARKS.md`.
+Numbers and methodology are in `docs/BENCHMARKS.md`. Summary measured on the
+Cortex-M3 firmware workload: flash traffic is identical to C for TSDB and
+2–5x lower for KVDB read-heavy operations; static RAM is 624 B vs C's
+1 064 B; total static+stack RAM is lower; ROM remains ~28% larger in the `-z`
+profile (see the report for the per-toolchain options and the remaining
+`min-size` work).
+
+## 8b. Build options
+
+| cargo feature | effect |
+|---|---|
+| `small-crc` | CRC32 uses a 64-byte nibble table instead of the 1 KiB byte table: −960 B `.rodata`, ~2x CRC CPU (matters only for large values). |
+| `fast-iter` | TS iterator dispatch is a direct `match` instead of a stored function pointer: faster per-entry CPU, ~+1 KiB ROM. |
+
+The default is performance-and-compatibility oriented; `small-crc` is for
+ROM-sensitive builds. Both preserve the on-flash format and behaviour.
 
 ## 9. Testing strategy
 

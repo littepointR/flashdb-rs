@@ -29,6 +29,14 @@ def weighted(flash):
     return flash["read_bytes"] + flash["write_bytes"] * 10 + flash["erase_bytes"] * 100
 
 
+def scenario_min_ns(s):
+    """Minimum measured phase time over runs (robust to host load), else median."""
+    extra = s.get("extra") or {}
+    if "total_ns_min" in extra:
+        return int(extra["total_ns_min"])
+    return int(s["total_ns_median"])
+
+
 def find_scenario(doc, name):
     for s in doc["scenarios"]:
         if s["name"] == name:
@@ -71,8 +79,11 @@ def main():
     out(f"C reference : {os.path.relpath(c_path, ROOT)} ({c.get('version', '?')})")
     out(f"Rust rewrite: {os.path.relpath(r_path, ROOT)} ({r.get('version', '?')})")
     out()
+    out("Timing column uses the **minimum** of the runs (best-of-N), which is far")
+    out("less sensitive to host load than the median; flash counters are deterministic.")
+    out()
     out(
-        "| scenario | ops | ns/op C | ns/op Rust | ratio | reads C | reads R | "
+        "| scenario | ops | ns/op C (min) | ns/op Rust (min) | ratio | reads C | reads R | "
         "writes C | writes R | erases C | erases R | weighted C | weighted R | checksum |"
     )
     out("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -85,7 +96,9 @@ def main():
             out(f"| {name} | - | - | - | - | - | - | - | - | - | - | - | - | MISSING |")
             continue
         cf, rf = cs["flash"], rs["flash"]
-        c_ns, r_ns = cs["ns_per_op"], rs["ns_per_op"]
+        ops = cs["ops"] or 1
+        c_ns = scenario_min_ns(cs) / ops
+        r_ns = scenario_min_ns(rs) / ops
         ratio = r_ns / c_ns if c_ns else 0.0
         ck_ok = cs["checksum"] == rs["checksum"]
         reads_ok = rf["reads"] <= cf["reads"]
@@ -93,6 +106,8 @@ def main():
         erases_ok = rf["erases"] <= cf["erases"]
         rbytes_ok = rf["read_bytes"] <= cf["read_bytes"]
         wbytes_ok = rf["write_bytes"] <= cf["write_bytes"]
+        # Compare best-of-runs (min) times: medians on a shared host are noisy;
+        # min is the closest estimate of the true CPU cost.
         time_ok = r_ns <= c_ns * 1.05  # 5% tolerance for host timing noise
         wc, wr = weighted(cf), weighted(rf)
         cost_ok = wr <= wc * 1.05

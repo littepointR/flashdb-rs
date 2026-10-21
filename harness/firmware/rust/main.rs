@@ -418,6 +418,7 @@ pub unsafe extern "C" fn __aeabi_memclr8(dst: *mut u8, n: usize) {
 /* Section sizes + stack high-water (identical method to the C firmware)    */
 /* ======================================================================== */
 
+#[repr(C)]
 struct Metrics {
     text: u32,
     rodata: u32,
@@ -427,8 +428,18 @@ struct Metrics {
     stack: u32,
     stack_init: u32,   /* mount/init phase (paint is fresh before main) */
     stack_limit: u32,
+    kv_writes: u32,
+    kv_gets: u32,
+    kv_iterated: u32,
+    kv_checksum: u32,
+    kv_iter_checksum: u32,
+    ts_appends: u32,
+    ts_iterated: u32,
+    ts_checksum: u32,
+    /// Diagnostic per-phase peaks; only present in `--phases` builds and
+    /// always at the end so `print_result`'s repr(C) table walk stays valid.
     #[cfg(feature = "stack-phases")]
-    st_set: u32,       /* isolated phase peaks, see stack_diagnostics() */
+    st_set: u32,
     #[cfg(feature = "stack-phases")]
     st_get: u32,
     #[cfg(feature = "stack-phases")]
@@ -439,14 +450,6 @@ struct Metrics {
     st_ts_append: u32,
     #[cfg(feature = "stack-phases")]
     st_ts_iter: u32,
-    kv_writes: u32,
-    kv_gets: u32,
-    kv_iterated: u32,
-    kv_checksum: u32,
-    kv_iter_checksum: u32,
-    ts_appends: u32,
-    ts_iterated: u32,
-    ts_checksum: u32,
 }
 
 impl Metrics {
@@ -460,6 +463,14 @@ impl Metrics {
             stack: 0,
             stack_init: 0,
             stack_limit: 0,
+            kv_writes: 0,
+            kv_gets: 0,
+            kv_iterated: 0,
+            kv_checksum: 0,
+            kv_iter_checksum: 0,
+            ts_appends: 0,
+            ts_iterated: 0,
+            ts_checksum: 0,
             #[cfg(feature = "stack-phases")]
             st_set: 0,
             #[cfg(feature = "stack-phases")]
@@ -472,14 +483,6 @@ impl Metrics {
             st_ts_append: 0,
             #[cfg(feature = "stack-phases")]
             st_ts_iter: 0,
-            kv_writes: 0,
-            kv_gets: 0,
-            kv_iterated: 0,
-            kv_checksum: 0,
-            kv_iter_checksum: 0,
-            ts_appends: 0,
-            ts_iterated: 0,
-            ts_checksum: 0,
         }
     }
 }
@@ -689,10 +692,10 @@ fn kv_mount() {
     // cache) is built directly in .bss, so mounting costs no stack copy.
     // FlashDB-C has the same property because fdb_kvdb_init() takes a pointer.
     let slot = unsafe { &mut *KV_DB.0.get() };
-    match Kvdb::mount_into(slot, flash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)) {
-        Ok(()) => {}
-        Err(_) => fail(b"kv_mount\0", 0),
-    }
+    let _ = ok_or_fail(
+        Kvdb::mount_into(slot, flash, Config::new(SECTOR_SIZE, KV_PARTITION_SIZE)),
+        TAG_KV_MOUNT,
+    );
 }
 
 #[inline(never)]
@@ -731,20 +734,30 @@ fn make_kv_key(out: &mut [u8; 5], idx: u32) {
     out[4] = HEX[(idx & 0xf) as usize];
 }
 
+#[inline(always)]
+fn hex_digit(v: u32) -> u8 {
+    unsafe { *HEX.get_unchecked((v & 0xf) as usize) }
+}
+
 fn make_kv_value(out: &mut [u8; KV_VALUE_LEN], idx: u32, gen: u32) {
-    out[0] = b'v';
-    out[1] = HEX[((gen >> 12) & 0xf) as usize];
-    out[2] = HEX[((gen >> 8) & 0xf) as usize];
-    out[3] = HEX[((gen >> 4) & 0xf) as usize];
-    out[4] = HEX[(gen & 0xf) as usize];
-    out[5] = b'-';
-    out[6] = HEX[((idx >> 4) & 0xf) as usize];
-    out[7] = HEX[(idx & 0xf) as usize];
-    out[8] = b'-';
-    let mut k = 9;
-    while k < KV_VALUE_LEN {
-        out[k] = HEX[((idx.wrapping_mul(7) + gen.wrapping_mul(13) + k as u32) & 0xf) as usize];
-        k += 1;
+    // Raw pointer writes: the length is a compile-time constant here, so this
+    // avoids bounds-check branches (and their panic paths) in the hot loop.
+    let p = out.as_mut_ptr();
+    unsafe {
+        *p = b'v';
+        *p.add(1) = hex_digit(gen >> 12);
+        *p.add(2) = hex_digit(gen >> 8);
+        *p.add(3) = hex_digit(gen >> 4);
+        *p.add(4) = hex_digit(gen);
+        *p.add(5) = b'-';
+        *p.add(6) = hex_digit(idx >> 4);
+        *p.add(7) = hex_digit(idx);
+        *p.add(8) = b'-';
+        let mut k = 9;
+        while k < KV_VALUE_LEN {
+            *p.add(k) = hex_digit(idx.wrapping_mul(7) + gen.wrapping_mul(13) + k as u32);
+            k += 1;
+        }
     }
 }
 
@@ -803,16 +816,6 @@ fn kv_put(db: &mut KvDb, idx: u32, gen: u32) {
     }
 }
 
-/// `n` consecutive `kv_put` calls with one `gen` (initial fill / update phase).
-#[inline(never)]
-fn kv_put_range(db: &mut KvDb, count: u32, gen: u32) {
-    let mut i = 0;
-    while i < count {
-        kv_put(db, i, gen);
-        i += 1;
-    }
-}
-
 /// One "get and verify the expected value" step (value check + memcmp).
 #[inline(never)]
 fn kv_get_verified(db: &mut KvDb, idx: u32, buf: &mut [u8; KV_VALUE_LEN]) {
@@ -837,9 +840,17 @@ fn kv_phase(m: &mut Metrics) {
     let mut iter_buf = [0u8; KV_VALUE_LEN];
 
     // 1. initial set of all keys, 2. update half of them
-    kv_put_range(db, KV_KEYS, 0);
+    let mut i = 0u32;
+    while i < KV_KEYS {
+        kv_put(db, i, 0);
+        i += 1;
+    }
     m.kv_writes += KV_KEYS;
-    kv_put_range(db, KV_UPDATES, 1);
+    i = 0;
+    while i < KV_UPDATES {
+        kv_put(db, i, 1);
+        i += 1;
+    }
     m.kv_writes += KV_UPDATES;
 
     // 3. GC churn: rewrite a small key set many times so the database has to
@@ -853,7 +864,7 @@ fn kv_phase(m: &mut Metrics) {
 
     // 4. get every key, verify and checksum its value (index order, so this
     //    checksum is implementation-order independent and matches the C side).
-    let mut i = 0u32;
+    i = 0;
     while i < KV_KEYS {
         kv_get_verified(db, i, &mut read_buf);
         m.kv_gets += 1;
@@ -913,7 +924,9 @@ fn tsdb_phase(m: &mut Metrics) {
             fail(TAG_TS_ITER, got as u32);
         }
         m.ts_iterated += 1;
-        m.ts_checksum = fnv1a(m.ts_checksum, &read_buf[..got]);
+        let got_slice =
+            unsafe { core::slice::from_raw_parts(read_buf.as_ptr(), got.min(read_buf.len())) };
+        m.ts_checksum = fnv1a(m.ts_checksum, got_slice);
         n += 1;
     }
     if n != TS_APPENDS {
@@ -1032,43 +1045,56 @@ fn stack_diagnostics(m: &mut Metrics) {
     m.st_ts_iter = stack_high_water_bytes();
 }
 
-/// Emit "label + decimal value" (the RESULT line is a fixed sequence of these).
-#[inline(always)]
-fn emit(label: &[u8], value: u32) {
-    write_bytes(label);
-    write_u32(value);
-}
-
 #[inline(never)]
 fn print_result(m: &Metrics) {
-    emit(b"RESULT text=\0", m.text);
-    emit(b" rodata=\0", m.rodata);
-    emit(b" data=\0", m.data);
-    emit(b" bss=\0", m.bss);
-    emit(b" sim_flash=\0", m.sim_flash);
-    emit(b" stack=\0", m.stack);
-    emit(b" stack_init=\0", m.stack_init);
-    emit(b" stack_limit=\0", m.stack_limit);
-    #[cfg(feature = "stack-phases")]
-    {
-        emit(b" st_set=\0", m.st_set);
-        emit(b" st_get=\0", m.st_get);
-        emit(b" st_iter=\0", m.st_iter);
-        emit(b" st_gc=\0", m.st_gc);
-        emit(b" st_ts_append=\0", m.st_ts_append);
-        emit(b" st_ts_iter=\0", m.st_ts_iter);
+    // Field order must match the `Metrics` declaration (repr(C), all u32).
+    const LABELS: [&[u8]; 16] = [
+        b"RESULT text=\0",
+        b" rodata=\0",
+        b" data=\0",
+        b" bss=\0",
+        b" sim_flash=\0",
+        b" stack=\0",
+        b" stack_init=\0",
+        b" stack_limit=\0",
+        b" kv_writes=\0",
+        b" kv_gets=\0",
+        b" kv_iterated=\0",
+        b" kv_checksum=\0",
+        b" kv_iter_checksum=\0",
+        b" ts_appends=\0",
+        b" ts_iterated=\0",
+        b" ts_checksum=\0",
+    ];
+    let values = m as *const Metrics as *const u32;
+    let mut i = 0;
+    while i < LABELS.len() {
+        write_bytes(LABELS[i]);
+        // checksums are printed in hex; labels 11 and 12 are the KV checksums,
+        // 15 is the TS checksum (see LABELS order).
+        match i {
+            11 | 12 | 15 => write_hex32(unsafe { *values.add(i) }),
+            _ => write_u32(unsafe { *values.add(i) }),
+        }
+        #[cfg(feature = "stack-phases")]
+        if i == 7 {
+            // Diagnostic fields go right after stack_limit, matching C's
+            // harness_print_result() field order.
+            write_bytes(b" st_set=\0");
+            write_u32(m.st_set);
+            write_bytes(b" st_get=\0");
+            write_u32(m.st_get);
+            write_bytes(b" st_iter=\0");
+            write_u32(m.st_iter);
+            write_bytes(b" st_gc=\0");
+            write_u32(m.st_gc);
+            write_bytes(b" st_ts_append=\0");
+            write_u32(m.st_ts_append);
+            write_bytes(b" st_ts_iter=\0");
+            write_u32(m.st_ts_iter);
+        }
+        i += 1;
     }
-    emit(b" kv_writes=\0", m.kv_writes);
-    emit(b" kv_gets=\0", m.kv_gets);
-    emit(b" kv_iterated=\0", m.kv_iterated);
-    write_bytes(b" kv_checksum=\0");
-    write_hex32(m.kv_checksum);
-    write_bytes(b" kv_iter_checksum=\0");
-    write_hex32(m.kv_iter_checksum);
-    emit(b" ts_appends=\0", m.ts_appends);
-    emit(b" ts_iterated=\0", m.ts_iterated);
-    write_bytes(b" ts_checksum=\0");
-    write_hex32(m.ts_checksum);
     write_bytes(b" rc=0\n\0");
 }
 

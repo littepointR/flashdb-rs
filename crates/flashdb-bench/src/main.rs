@@ -15,16 +15,17 @@
 //! The JSON is written to `harness/results/rust_wg<NN>_host.json`.
 
 use flashdb::{Config, Error, Flash, Kvdb, KvdbImpl, KvdbNoCache, KvdbSmallCache, Timestamp, Tsdb, TsdbImpl, TslStatus};
-use flashdb_sim::{RamFlash, SimError};
-use std::cell::{Cell, RefCell};
-use std::fmt::Write as _;
+
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::fmt::Write as _;
 use std::time::Instant;
 
 const SEC_SIZE: u32 = 4096;
 const MAX_SIZE: u32 = 16384;
 const FLASH_SIZE: usize = 16384;
 const DEFAULT_RUNS: u32 = 5;
+
 const TS_MAX_LOG_LEN: u32 = 32;
 const TS_PAYLOAD_LEN: usize = 32;
 const TS_START_TIME: i32 = 1000;
@@ -40,12 +41,33 @@ const BENCH_FNV32_PRIME: u32 = 0x0100_0193;
 
 #[derive(Debug, Default)]
 struct Counters {
-    reads: Cell<u64>,
-    read_bytes: Cell<u64>,
-    writes: Cell<u64>,
-    write_bytes: Cell<u64>,
-    erases: Cell<u64>,
-    erase_bytes: Cell<u64>,
+    reads: u64,
+    read_bytes: u64,
+    writes: u64,
+    write_bytes: u64,
+    erases: u64,
+    erase_bytes: u64,
+}
+
+/// Process-global counters (the benchmark is single-threaded). This keeps the
+/// per-flash-operation accounting cost equivalent to the C harness's global
+/// counters instead of paying for `Rc<Cell<..>>` indirection on every access.
+struct GlobalCounters(std::cell::UnsafeCell<Counters>);
+unsafe impl Sync for GlobalCounters {}
+
+static COUNTERS: GlobalCounters = GlobalCounters(std::cell::UnsafeCell::new(Counters {
+    reads: 0,
+    read_bytes: 0,
+    writes: 0,
+    write_bytes: 0,
+    erases: 0,
+    erase_bytes: 0,
+}));
+
+#[allow(unsafe_code)]
+fn counters_mut() -> &'static mut Counters {
+    // SAFETY: benchmarks are single-threaded; no references escape a step.
+    unsafe { &mut *COUNTERS.0.get() }
 }
 
 /// Plain copy used for JSON/reporting.
@@ -62,74 +84,103 @@ struct CounterSnapshot {
 impl Counters {
     fn snapshot(&self) -> CounterSnapshot {
         CounterSnapshot {
-            reads: self.reads.get(),
-            read_bytes: self.read_bytes.get(),
-            writes: self.writes.get(),
-            write_bytes: self.write_bytes.get(),
-            erases: self.erases.get(),
-            erase_bytes: self.erase_bytes.get(),
+            reads: self.reads,
+            read_bytes: self.read_bytes,
+            writes: self.writes,
+            write_bytes: self.write_bytes,
+            erases: self.erases,
+            erase_bytes: self.erase_bytes,
         }
     }
 
     fn reset(&self) {
-        self.reads.set(0);
-        self.read_bytes.set(0);
-        self.writes.set(0);
-        self.write_bytes.set(0);
-        self.erases.set(0);
-        self.erase_bytes.set(0);
+        let c = counters_mut();
+        c.reads = 0;
+        c.read_bytes = 0;
+        c.writes = 0;
+        c.write_bytes = 0;
+        c.erases = 0;
+        c.erase_bytes = 0;
     }
 }
 
 struct BenchFlash<const WG: u32> {
-    inner: RamFlash<FLASH_SIZE, WG>,
-    counters: Rc<Counters>,
+    data: std::vec::Vec<u8>,
 }
 
 impl<const WG: u32> BenchFlash<WG> {
-    fn new(counters: Rc<Counters>) -> Self {
+    fn new() -> Self {
         Self {
-            inner: RamFlash::<FLASH_SIZE, WG>::new(SEC_SIZE),
-            counters,
+            data: std::vec![0xFFu8; FLASH_SIZE],
+        }
+    }
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchError {
+    OutOfBounds,
+    UnalignedErase,
+}
+
+impl core::fmt::Display for BenchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            BenchError::OutOfBounds => f.write_str("out of bounds"),
+            BenchError::UnalignedErase => f.write_str("unaligned erase"),
         }
     }
 }
 
 impl<const WG: u32> Flash for BenchFlash<WG> {
-    type Error = SimError;
+    type Error = BenchError;
+
     const WRITE_GRAN_BITS: u32 = WG;
 
+    #[inline]
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
-        let result = self.inner.read(addr, buf);
-        if result.is_ok() {
-            self.counters.reads.set(self.counters.reads.get() + 1);
-            self.counters
-                .read_bytes
-                .set(self.counters.read_bytes.get() + buf.len() as u64);
+        let start = addr as usize;
+        let end = start.checked_add(buf.len()).ok_or(BenchError::OutOfBounds)?;
+        if end > FLASH_SIZE {
+            return Err(BenchError::OutOfBounds);
         }
-        result
+        buf.copy_from_slice(&self.data[start..end]);
+        let c = counters_mut();
+        c.reads += 1;
+        c.read_bytes += buf.len() as u64;
+        Ok(())
     }
 
+    #[inline]
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), Self::Error> {
-        let result = self.inner.write(addr, buf);
-        if result.is_ok() {
-            self.counters.writes.set(self.counters.writes.get() + 1);
-            self.counters
-                .write_bytes
-                .set(self.counters.write_bytes.get() + buf.len() as u64);
+        let start = addr as usize;
+        let end = start.checked_add(buf.len()).ok_or(BenchError::OutOfBounds)?;
+        if end > FLASH_SIZE {
+            return Err(BenchError::OutOfBounds);
         }
-        result
+        for (i, b) in buf.iter().enumerate() {
+            self.data[start + i] &= *b;
+        }
+        let c = counters_mut();
+        c.writes += 1;
+        c.write_bytes += buf.len() as u64;
+        Ok(())
     }
 
+    #[inline]
     fn erase(&mut self, addr: u32, len: u32) -> Result<(), Self::Error> {
-        let result = self.inner.erase(addr, len);
-        if result.is_ok() {
-            self.counters.erases.set(self.counters.erases.get() + 1);
-            self.counters
-                .erase_bytes
-                .set(self.counters.erase_bytes.get() + len as u64);
+        let start = addr as usize;
+        let end = start
+            .checked_add(len as usize)
+            .ok_or(BenchError::OutOfBounds)?;
+        if end > FLASH_SIZE || start % SEC_SIZE as usize != 0 || len % SEC_SIZE != 0 {
+            return Err(BenchError::UnalignedErase);
         }
-        result
+        self.data[start..end].fill(0xFF);
+        let c = counters_mut();
+        c.erases += 1;
+        c.erase_bytes += len as u64;
+        Ok(())
     }
 }
 
@@ -138,7 +189,7 @@ impl<const WG: u32> Flash for BenchFlash<WG> {
 struct DummyFlash<const WG: u32>;
 
 impl<const WG: u32> Flash for DummyFlash<WG> {
-    type Error = SimError;
+    type Error = BenchError;
     const WRITE_GRAN_BITS: u32 = WG;
     fn read(&mut self, _: u32, _: &mut [u8]) -> Result<(), Self::Error> {
         unreachable!()
@@ -219,14 +270,14 @@ struct Errcodes {
 }
 
 impl Errcodes {
-    fn record<T>(&mut self, result: &Result<T, Error<SimError>>) {
+    fn record<T>(&mut self, result: &Result<T, Error<BenchError>>) {
         match result {
             Ok(_) => self.ok += 1,
             Err(e) => self.record_err(e),
         }
     }
 
-    fn record_err(&mut self, e: &Error<SimError>) {
+    fn record_err(&mut self, e: &Error<BenchError>) {
         match e {
             Error::FlashRead(_) => self.read_err += 1,
             Error::FlashWrite(_) => self.write_err += 1,
@@ -264,10 +315,8 @@ impl Errcodes {
 #[derive(Debug, Clone)]
 enum ExtraVal {
     U(u64),
-    I(i64),
-    F(f64),
     B(bool),
-    S(String),
+    ArrI64(Vec<i64>),
 }
 
 #[derive(Debug, Default)]
@@ -298,6 +347,19 @@ struct Scenario {
     extra: Vec<(&'static str, ExtraVal)>,
 }
 
+fn timing_extras(samples: &[u64]) -> Vec<(&'static str, ExtraVal)> {
+    let min = *samples.iter().min().unwrap_or(&0);
+    let max = *samples.iter().max().unwrap_or(&0);
+    vec![
+        (
+            "samples_ns",
+            ExtraVal::ArrI64(samples.iter().map(|v| *v as i64).collect()),
+        ),
+        ("total_ns_min", ExtraVal::U(min)),
+        ("total_ns_max", ExtraVal::U(max)),
+    ]
+}
+
 fn median(values: &mut [u64]) -> u64 {
     values.sort_unstable();
     let n = values.len();
@@ -322,17 +384,18 @@ fn extra_json(extra: &[(&'static str, ExtraVal)]) -> String {
             ExtraVal::U(x) => {
                 let _ = write!(out, "{x}");
             }
-            ExtraVal::I(x) => {
-                let _ = write!(out, "{x}");
-            }
-            ExtraVal::F(x) => {
-                let _ = write!(out, "{x:.6}");
-            }
             ExtraVal::B(x) => {
                 let _ = write!(out, "{x}");
             }
-            ExtraVal::S(x) => {
-                let _ = write!(out, "\"{x}\"");
+            ExtraVal::ArrI64(xs) => {
+                out.push('[');
+                for (i, v) in xs.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    let _ = write!(out, "{v}");
+                }
+                out.push(']');
             }
         }
     }
@@ -357,17 +420,18 @@ impl Scenario {
                 ExtraVal::U(x) => {
                     let _ = write!(merged, "{x}");
                 }
-                ExtraVal::I(x) => {
-                    let _ = write!(merged, "{x}");
-                }
-                ExtraVal::F(x) => {
-                    let _ = write!(merged, "{x:.6}");
-                }
                 ExtraVal::B(x) => {
                     let _ = write!(merged, "{x}");
                 }
-                ExtraVal::S(x) => {
-                    let _ = write!(merged, "\"{x}\"");
+                ExtraVal::ArrI64(xs) => {
+                    merged.push('[');
+                    for (i, v) in xs.iter().enumerate() {
+                        if i > 0 {
+                            merged.push(',');
+                        }
+                        let _ = write!(merged, "{v}");
+                    }
+                    merged.push(']');
                 }
             }
         }
@@ -476,15 +540,15 @@ where
     let mut first_flash: Option<CounterSnapshot> = None;
     let mut flash_consistent = true;
     for _ in 0..runs {
-        let counters = Rc::new(Counters::default());
-        let flash = BenchFlash::<WG>::new(counters.clone());
+        
+        let flash = BenchFlash::<WG>::new();
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv mount");
         setup(&mut db);
-        counters.reset();
+        counters_mut().reset();
         let start = Instant::now();
         let body_out = body(&mut db);
         let elapsed = start.elapsed().as_nanos() as u64;
-        let flash_out = counters.snapshot();
+        let flash_out = counters_mut().snapshot();
         let finish_out = finish(&mut db);
         samples.push(elapsed);
         last_body = body_out;
@@ -503,10 +567,8 @@ where
     let median_ns = median(&mut samples);
     let mut extra = last_finish.extra;
     extra.extend(last_body.extra);
-    extra.push((
-        "flash_consistent",
-        ExtraVal::B(flash_consistent),
-    ));
+    extra.extend(timing_extras(&samples));
+    extra.push(("flash_consistent", ExtraVal::B(flash_consistent)));
     Scenario {
         name,
         ops: last_body.ops,
@@ -544,16 +606,16 @@ where
     let mut first_flash: Option<CounterSnapshot> = None;
     let mut flash_consistent = true;
     for _ in 0..runs {
-        let counters = Rc::new(Counters::default());
-        let flash = BenchFlash::<WG>::new(counters.clone());
+        
+        let flash = BenchFlash::<WG>::new();
         let mut db =
             Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("ts mount");
         setup(&mut db);
-        counters.reset();
+        counters_mut().reset();
         let start = Instant::now();
         let body_out = body(&mut db);
         let elapsed = start.elapsed().as_nanos() as u64;
-        let flash_out = counters.snapshot();
+        let flash_out = counters_mut().snapshot();
         let finish_out = finish(&mut db);
         samples.push(elapsed);
         last_body = body_out;
@@ -572,6 +634,7 @@ where
     let median_ns = median(&mut samples);
     let mut extra = last_finish.extra;
     extra.extend(last_body.extra);
+    extra.extend(timing_extras(&samples));
     extra.push(("flash_consistent", ExtraVal::B(flash_consistent)));
     Scenario {
         name,
@@ -603,12 +666,12 @@ fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
     let mut entries = 0u32;
     let mut value_bytes = 0u64;
     for _ in 0..runs {
-        let counters = Rc::new(Counters::default());
-        let flash = BenchFlash::<WG>::new(counters.clone());
+        
+        let flash = BenchFlash::<WG>::new();
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv mount");
         setup_32_keys(&mut db);
         let mut holder = Some(db.into_flash());
-        counters.reset();
+        counters_mut().reset();
         let start = Instant::now();
         let mut run_ok = 0u64;
         for _ in 0..100 {
@@ -626,7 +689,7 @@ fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
         }
         let elapsed = start.elapsed().as_nanos() as u64;
         samples.push(elapsed);
-        last_flash = counters.snapshot();
+        last_flash = counters_mut().snapshot();
         mount_ok = run_ok;
         let flash = holder.take().expect("flash after mounts");
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv remount");
@@ -646,12 +709,16 @@ fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
         checksum,
         errcodes,
         flash: last_flash,
-        extra: vec![
-            ("entries", ExtraVal::U(entries as u64)),
-            ("value_bytes", ExtraVal::U(value_bytes)),
-            ("mount_ok", ExtraVal::U(mount_ok)),
-            ("flash_consistent", ExtraVal::B(true)),
-        ],
+        extra: {
+            let mut e = vec![
+                ("entries", ExtraVal::U(entries as u64)),
+                ("value_bytes", ExtraVal::U(value_bytes)),
+                ("mount_ok", ExtraVal::U(mount_ok)),
+            ];
+            e.extend(timing_extras(&samples));
+            e.push(("flash_consistent", ExtraVal::B(true)));
+            e
+        },
     }
 }
 
@@ -1128,8 +1195,7 @@ fn run_kv_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
 }
 
 fn ts_probe_capacity<const WG: u32>() -> u32 {
-    let counters = Rc::new(Counters::default());
-    let flash = BenchFlash::<WG>::new(counters);
+    let flash = BenchFlash::<WG>::new();
     let mut db =
         Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("probe mount");
     db.set_rollover(false);
@@ -1226,8 +1292,8 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
     let mut checksum = 0u32;
     let mut populated = 0u32;
     for _ in 0..runs {
-        let counters = Rc::new(Counters::default());
-        let flash = BenchFlash::<WG>::new(counters.clone());
+        
+        let flash = BenchFlash::<WG>::new();
         let mut db =
             Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("ts mount");
         db.set_rollover(false);
@@ -1236,7 +1302,7 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
         // so the functional checksum is taken from the pre-mount state.
         checksum = ts_snapshot_checksum(&mut db).0;
         let mut holder = Some(db.into_flash());
-        counters.reset();
+        counters_mut().reset();
         let start = Instant::now();
         let mut run_ok = 0u64;
         for _ in 0..50 {
@@ -1254,7 +1320,7 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
         }
         let elapsed = start.elapsed().as_nanos() as u64;
         samples.push(elapsed);
-        last_flash = counters.snapshot();
+        last_flash = counters_mut().snapshot();
         mount_ok = run_ok;
     }
     let median_ns = median(&mut samples);
@@ -1268,12 +1334,16 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
         checksum,
         errcodes,
         flash: last_flash,
-        extra: vec![
-            ("mount_ok", ExtraVal::U(mount_ok)),
-            ("populated", ExtraVal::U(populated as u64)),
-            ("checksum_from_pre_mount_state", ExtraVal::B(true)),
-            ("flash_consistent", ExtraVal::B(true)),
-        ],
+        extra: {
+            let mut e = vec![
+                ("mount_ok", ExtraVal::U(mount_ok)),
+                ("populated", ExtraVal::U(populated as u64)),
+                ("checksum_from_pre_mount_state", ExtraVal::B(true)),
+            ];
+            e.extend(timing_extras(&samples));
+            e.push(("flash_consistent", ExtraVal::B(true)));
+            e
+        },
     }
 }
 

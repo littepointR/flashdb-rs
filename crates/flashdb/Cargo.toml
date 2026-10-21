@@ -8,6 +8,12 @@ license.workspace = true
 [features]
 default = []
 std = []
+# Size-oriented CRC32: 64-byte nibble table instead of the 1 KiB byte table.
+# Saves 960 bytes of .rodata at ~2x CRC CPU (still cheap relative to flash).
+small-crc = []
+# Performance-oriented iterator dispatch: direct `match` in `Iterator::next`
+# instead of a stored function pointer. Faster per-entry CPU, ~+1 KiB ROM.
+fast-iter = []
 # Enable implementation for embedded-storage traits (optional)
 # embedded-storage = ["dep:embedded-storage"]
 # defmt = ["dep:defmt"]

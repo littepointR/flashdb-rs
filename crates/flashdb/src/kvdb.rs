@@ -166,7 +166,46 @@ fn fill_sector_header(
     put_u32(buf, mo + 8, FAILED_ADDR);
 }
 
+/// Write the fields of a formatted sector header (magic, combined, reserved),
+/// starting at `sec_magic_off`. Returns the number of bytes written.
+#[inline]
+fn write_sector_header_tail<F: Flash>(
+    storage: &mut Storage<F>,
+    addr: u32,
+    lay: &KvLayout,
+    combined: u32,
+) -> Result<(), F::Error> {
+    let mo = lay.sec_magic_off as usize;
+    let block = lay.sec_raw_size as usize - mo;
+    if block <= 32 {
+        let mut b = [0xFFu8; 32];
+        put_u32(&mut b, 0, KVDB_SECTOR_MAGIC);
+        put_u32(&mut b, 4, combined);
+        put_u32(&mut b, 8, FAILED_ADDR);
+        storage.write(addr + mo as u32, &b[..block])
+    } else if block <= 64 {
+        let mut b = [0xFFu8; 64];
+        put_u32(&mut b, 0, KVDB_SECTOR_MAGIC);
+        put_u32(&mut b, 4, combined);
+        put_u32(&mut b, 8, FAILED_ADDR);
+        storage.write(addr + mo as u32, &b[..block])
+    } else {
+        let mut b = [0xFFu8; 128];
+        put_u32(&mut b, 0, KVDB_SECTOR_MAGIC);
+        put_u32(&mut b, 4, combined);
+        put_u32(&mut b, 8, FAILED_ADDR);
+        storage.write(addr + mo as u32, &b[..block])
+    }
+}
+
 /// Erase a sector and write a fresh sector header (EMPTY / clean).
+///
+/// For write granularity 1 this is the single full-struct write FlashDB-C does
+/// (`FDB_WRITE_GRAN == 1` branch of `format_sector`). For larger granularities
+/// C writes three separate pieces -- store status, dirty status, then the
+/// magic/combined/reserved block -- to avoid re-programming chunks containing
+/// already-written status bits; replicating that also keeps the flash byte
+/// counters identical.
 #[inline]
 fn write_formatted_sector_header<F: Flash>(
     storage: &mut Storage<F>,
@@ -175,32 +214,18 @@ fn write_formatted_sector_header<F: Flash>(
     combined: u32,
 ) -> Result<(), F::Error> {
     let wg = F::WRITE_GRAN_BITS;
-    let mut scratch = [0u8; 32];
-    if wg <= 8 {
-        let mut b = [0xFFu8; 20];
-        let raw = lay.sec_raw_size as usize;
-        fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
-        storage.write(addr, &b[..raw])
-    } else if wg <= 32 {
+    let store_status = SectorStoreStatus::Empty as usize;
+    let dirty_status = SectorDirtyStatus::False as usize;
+    if wg == 1 {
+        let mut scratch = [0u8; 32];
         let mut b = [0xFFu8; 36];
         let raw = lay.sec_raw_size as usize;
         fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
         storage.write(addr, &b[..raw])
-    } else if wg <= 64 {
-        let mut b = [0xFFu8; 64];
-        let raw = lay.sec_raw_size as usize;
-        fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
-        storage.write(addr, &b[..raw])
-    } else if wg <= 128 {
-        let mut b = [0xFFu8; 112];
-        let raw = lay.sec_raw_size as usize;
-        fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
-        storage.write(addr, &b[..raw])
     } else {
-        let mut b = [0xFFu8; 224];
-        let raw = lay.sec_raw_size as usize;
-        fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
-        storage.write(addr, &b[..raw])
+        storage.write_status(addr + lay.sec_store_off, SEC_STATUS_NUM, store_status)?;
+        storage.write_status(addr + lay.sec_dirty_off, SEC_STATUS_NUM, dirty_status)?;
+        write_sector_header_tail(storage, addr, lay, combined)
     }
 }
 
@@ -541,15 +566,29 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// A static database therefore costs no stack copy:
     ///
     /// ```no_run
-    /// # use flashdb::{Config, Flash, Kvdb};
-    /// # use core::mem::MaybeUninit;
-    /// # fn demo<F: Flash>(flash: F) -> Result<(), flashdb::Error<F::Error>> {
-    /// static mut DB: MaybeUninit<Kvdb<F>> = MaybeUninit::uninit();
-    /// # unsafe {
-    /// flashdb::Kvdb::mount_into(&mut *core::ptr::addr_of_mut!(DB), flash, Config::new(4096, 16384))?;
-    /// # }
-    /// # Ok(())
-    /// # }
+    /// use flashdb::{Config, Flash, Kvdb};
+    /// use core::mem::MaybeUninit;
+    ///
+    /// struct MyFlash;
+    /// impl Flash for MyFlash {
+    ///     type Error = core::convert::Infallible;
+    ///     fn read(&mut self, _: u32, _: &mut [u8]) -> Result<(), Self::Error> { Ok(()) }
+    ///     fn write(&mut self, _: u32, _: &[u8]) -> Result<(), Self::Error> { Ok(()) }
+    ///     fn erase(&mut self, _: u32, _: u32) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    ///
+    /// static mut DB: MaybeUninit<Kvdb<MyFlash>> = MaybeUninit::uninit();
+    ///
+    /// fn boot(flash: MyFlash) -> Result<(), flashdb::Error<core::convert::Infallible>> {
+    ///     // SAFETY: single-threaded initialization before the database is used.
+    ///     unsafe {
+    ///         Kvdb::mount_into(
+    ///             &mut *core::ptr::addr_of_mut!(DB),
+    ///             flash,
+    ///             Config::new(4096, 16384),
+    ///         )
+    ///     }
+    /// }
     /// ```
     ///
     /// `defaults` are written when the partition has to be formatted, exactly
