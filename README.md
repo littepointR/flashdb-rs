@@ -51,8 +51,10 @@ internals are Rust-native:
 * **No global state.** A database owns its flash through generics
   (`Kvdb<F>` / `Tsdb<F, T>`), instead of a FAL registry and a global lock.
   Implement the `Flash` trait for a partition view and pass it in.
-* **No heap, no `unsafe`.** `#![no_std]`, `#![forbid(unsafe_code)]`, all
-  buffers are stack or caller-provided.
+* **No heap, no global state.** `#![no_std]`, all buffers are stack or
+  caller-provided. The crate is `#![deny(unsafe_code)]` with exactly one
+  audited exception: placement initialization (`mount_into`) so that a
+  database stored in a `static` (the normal MCU pattern) needs no stack copy.
 * **Typed errors.** `Error<E>` carries the flash driver's own error and says
   which operation failed; no `FDB_ASSERT` busy-loop, no error codes lost.
 * **Iterators instead of callbacks.** KV and TS iteration are real
@@ -67,7 +69,10 @@ internals are Rust-native:
   into the caller's buffer instead of reading the value twice.
 * **Less RAM.** A 2-way set-associative 64-entry name cache (516 B incl. LRU)
   replaces C's 512 B cache *plus* ≈320 B sector cache. The `Kvdb` struct is
-  548 B vs C's 1064 B; `Tsdb` is 140 B vs 160 B (32-bit targets).
+  548 B vs C's 1064 B; `Tsdb` is 140 B vs 160 B (32-bit targets). Embedded
+  users can mount both databases directly into `static`s
+  (`Kvdb::mount_into`, `Tsdb::mount_into`), avoiding the stack copy of the
+  database struct that a by-value constructor would otherwise need.
 * **Fewer CPU cycles.** Direct next-record addressing (no magic-word rescan per
   record), O(1) cache probing instead of a 64-entry linear scan, no per-record
   full-value CRC during traversal.

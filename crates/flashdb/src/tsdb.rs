@@ -860,7 +860,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// of always using the largest layout, which keeps this per-entry hot path
     /// cheap on the common 1/8/32-bit configurations.
     fn read_tsl(&mut self, index_addr: u32) -> Result<TslEntry<T>, F::Error> {
-        let layout = self.layout;
+        let layout = self.lay();
         let wg = F::WRITE_GRAN_BITS;
         let size = layout.log_idx_raw_size as usize;
         let max_len = self.max_len;
@@ -896,7 +896,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// Read and decode one sector header (`read_sector_info()`), including the
     /// `empty_idx` / `empty_data` / `remain` bookkeeping for a USING sector.
     fn read_sector_info(&mut self, addr: u32, traversal: bool) -> Result<SecInfo<T>, F::Error> {
-        let layout = self.layout;
+        let layout = self.lay();
         let wg = F::WRITE_GRAN_BITS;
         let sec_size = self.storage.sec_size();
         let size = layout.sec_raw_size as usize;
@@ -993,7 +993,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// Erase one sector and write the EMPTY status + magic word
     /// (`format_sector()`).
     fn format_sector(&mut self, addr: u32) -> Result<(), F::Error> {
-        let layout = self.layout;
+        let layout = self.lay();
         self.storage.erase_sector(addr)?;
         self.storage.write_status(
             addr + layout.sec_store_off,
@@ -1040,7 +1040,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         end_time: T,
         slot: usize,
     ) -> Result<(), F::Error> {
-        let layout = self.layout;
+        let layout = self.lay();
         let (stat_off, time_off, idx_off) = if slot == 0 {
             (
                 layout.sec_end0_stat_off,
@@ -1083,7 +1083,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// next sector (formatting it when it still holds old data) and make an
     /// EMPTY sector USING (`update_sec_status()`).
     fn update_sec_status(&mut self, data_len: u32, cur_time: T) -> Result<(), F::Error> {
-        let layout = self.layout;
+        let layout = self.lay();
         let wg = F::WRITE_GRAN_BITS;
         let sec_size = self.storage.sec_size();
         let max_size = self.storage.max_size();
@@ -1165,7 +1165,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// Write one TSL: PRE_WRITE status, index record, aligned payload, Write
     /// status (`write_tsl()`).
     fn write_tsl(&mut self, time: T, data: &[u8]) -> Result<(), F::Error> {
-        let layout = self.layout;
+        let layout = self.lay();
         let wg = F::WRITE_GRAN_BITS;
         let idx_addr = self.cur_sec.empty_idx;
         let log_addr = self.cur_sec.empty_data - wg_align(data.len(), wg) as u32;
@@ -1273,7 +1273,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
     /// sector. Reading outside of it would leave the sector (or would read
     /// payload bytes as an index record).
     fn index_bounds(&self) -> (u32, u32) {
-        let layout = self.db.layout;
+        let layout = self.db.lay();
         let first = self.sec.addr + layout.sec_hdr_size;
         let last = self.sec.addr + self.db.storage.sec_size() - layout.log_idx_raw_size;
         (first, last)
@@ -1304,7 +1304,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
             }
             if self.in_sector {
                 let index = self.next_index;
-                let layout = self.db.layout;
+                let layout = self.db.lay();
                 let next = if forward {
                     next_tsl_addr(&self.sec, index, layout.log_idx_size)
                 } else {
@@ -1350,7 +1350,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                 } else {
                     sec
                 };
-                let layout = self.db.layout;
+                let layout = self.db.lay();
                 if sector_has_entries(&sec, layout.sec_hdr_size) {
                     self.next_index = if forward {
                         sec.addr + layout.sec_hdr_size
@@ -1377,7 +1377,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
             }
             if self.in_sector {
                 let index = self.next_index;
-                let layout = self.db.layout;
+                let layout = self.db.lay();
                 let next = if forward {
                     next_tsl_addr(&self.sec, index, layout.log_idx_size)
                 } else {
@@ -1448,7 +1448,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                     };
                 if enter {
                     self.found_start = true;
-                    let layout = self.db.layout;
+                    let layout = self.db.lay();
                     if sector_has_entries(&sec, layout.sec_hdr_size) {
                         let first = sec.addr + layout.sec_hdr_size;
                         let start = match self.db.search_start_tsl_addr(

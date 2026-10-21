@@ -14,10 +14,14 @@ docs in `crates/flashdb/src/*.rs` cover the details of each algorithm.
 2. **At least the same performance and RAM/ROM footprint.**
    The acceptance evidence is in `docs/BENCHMARKS.md`: host micro-benchmarks
    with flash-op/byte accounting, and a Cortex-M3/QEMU firmware comparison.
-3. **`no_std`, no heap, no global state, no `unsafe`.**
-   The crate is `#![no_std] #![forbid(unsafe_code)]`; all buffers are stack or
+3. **`no_std`, no heap, no global state, no `unsafe` in the algorithms.**
+   The crate is `#![no_std] #![deny(unsafe_code)]`; all buffers are stack or
    caller-provided; a database *owns* its flash view (`Kvdb<F>`), so several
    databases/drivers can coexist without a FAL-style global registry or lock.
+   The single audited `unsafe` block is the placement initializer
+   (`mount_into`), which writes every field of a database exactly once into a
+   caller-provided `MaybeUninit` so a `static` database costs no stack copy.
+   Everything above it (parsing, CRC, GC, recovery, iterators) is safe code.
 4. **Rust-native API.** `Result` with the driver's own error type, iterators
    instead of callbacks, compile-time configuration, typed statuses.
 
@@ -211,6 +215,19 @@ No `deinit()` is needed: dropping the DB (or `into_flash()`) returns the
 driver. A mount is a normal constructor, so two DBs can be mounted on two
 different partitions of the same driver when the driver is split into
 partition views by the user's `Flash` implementations.
+
+Firmware usually keeps its databases in `.bss`. The by-value constructors
+return the whole database struct, which on a small MCU means copying it (and
+its 512-byte name cache) through the stack. The placement variants avoid that:
+
+```rust
+static mut DB: MaybeUninit<Kvdb<MyFlash>> = MaybeUninit::uninit();
+// SAFETY: single-threaded init before any other use.
+unsafe { Kvdb::mount_into(&mut *addr_of_mut!(DB), flash, cfg)? };
+```
+
+This mirrors FlashDB-C's `fdb_kvdb_init(db, ...)` pointer API; in the Cortex-M3
+comparison it removes ~1 KB of mount stack usage.
 
 ## 8. Performance model
 

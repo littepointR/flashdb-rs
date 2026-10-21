@@ -155,6 +155,8 @@ fn exit() -> ! {
     loop {}
 }
 
+#[cold]
+#[inline(never)]
 fn fail(stage: &[u8], code: u32) -> ! {
     write_bytes(b"ERROR stage=\0");
     write_bytes(stage);
@@ -162,6 +164,31 @@ fn fail(stage: &[u8], code: u32) -> ! {
     write_u32(code);
     write_bytes(b"\nRESULT rc=1\n\0");
     exit()
+}
+
+/* --------------------------------------------------------------------- */
+/* Failure handling                                                        */
+/*                                                                         */
+/* One cold, never-inlined exit path; call sites use short shared tags     */
+/* instead of a unique NUL-terminated string per operation (the tags are   */
+/* only printed when a workload step fails, they are not part of RESULT).  */
+/* --------------------------------------------------------------------- */
+
+const TAG_KV_MOUNT: &[u8] = b"kv_mount\0";
+const TAG_TS_MOUNT: &[u8] = b"ts_mount\0";
+const TAG_KV_SET: &[u8] = b"kv_set\0";
+const TAG_KV_GET: &[u8] = b"kv_get\0";
+const TAG_KV_ITER: &[u8] = b"kv_iter\0";
+const TAG_TS_APPEND: &[u8] = b"ts_append\0";
+const TAG_TS_ITER: &[u8] = b"ts_iter\0";
+
+/// Unwrap a database operation, exiting through `fail()` on error.
+#[inline(always)]
+fn ok_or_fail<T, E>(r: core::result::Result<T, E>, tag: &[u8]) -> T {
+    match r {
+        Ok(v) => v,
+        Err(_) => fail(tag, 0),
+    }
 }
 
 /* ======================================================================== */
@@ -672,14 +699,13 @@ fn kv_mount() {
 fn ts_mount() {
     let flash = ts_flash();
     flash.erase_all();
-    match Tsdb::mount(flash, Config::new(SECTOR_SIZE, TS_PARTITION_SIZE), TS_MAX_LEN) {
-        Ok(mut db) => {
-            db.set_rollover(false);
-            unsafe {
-                (*TS_DB.0.get()).write(db);
-            }
-        }
-        Err(_) => fail(b"ts_mount\0", 0),
+    let mut db = ok_or_fail(
+        Tsdb::mount(flash, Config::new(SECTOR_SIZE, TS_PARTITION_SIZE), TS_MAX_LEN),
+        TAG_TS_MOUNT,
+    );
+    db.set_rollover(false);
+    unsafe {
+        (*TS_DB.0.get()).write(db);
     }
 }
 
@@ -763,67 +789,73 @@ fn fnv1a(mut h: u32, data: &[u8]) -> u32 {
 /* KVDB phase -- real Rust flashdb crate                                    */
 /* ======================================================================== */
 
+/// One "make key/value and set" step, shared by the initial, update and churn
+/// loops (single out-of-line copy instead of three inlined expansions).
+#[inline(never)]
+fn kv_put(db: &mut KvDb, idx: u32, gen: u32) {
+    let mut key = [0u8; 5];
+    let mut value = [0u8; KV_VALUE_LEN];
+
+    make_kv_key(&mut key, idx);
+    make_kv_value(&mut value, idx, gen);
+    if db.set(&key, &value).is_err() {
+        fail(TAG_KV_SET, idx);
+    }
+}
+
+/// `n` consecutive `kv_put` calls with one `gen` (initial fill / update phase).
+#[inline(never)]
+fn kv_put_range(db: &mut KvDb, count: u32, gen: u32) {
+    let mut i = 0;
+    while i < count {
+        kv_put(db, i, gen);
+        i += 1;
+    }
+}
+
+/// One "get and verify the expected value" step (value check + memcmp).
+#[inline(never)]
+fn kv_get_verified(db: &mut KvDb, idx: u32, buf: &mut [u8; KV_VALUE_LEN]) {
+    let mut key = [0u8; 5];
+    let mut expected = [0u8; KV_VALUE_LEN];
+
+    make_kv_key(&mut key, idx);
+    make_kv_value(&mut expected, idx, expected_gen(idx));
+    match db.get(&key, buf) {
+        Ok(Some(got)) if got == KV_VALUE_LEN => {}
+        _ => fail(TAG_KV_GET, idx),
+    }
+    if unsafe { memcmp(buf.as_ptr(), expected.as_ptr(), KV_VALUE_LEN) } != 0 {
+        fail(TAG_KV_GET, idx);
+    }
+}
+
 #[inline(never)]
 fn kv_phase(m: &mut Metrics) {
     let db = kv();
-    let mut key = [0u8; 5];
-    let mut value = [0u8; KV_VALUE_LEN];
     let mut read_buf = [0u8; KV_VALUE_LEN];
     let mut iter_buf = [0u8; KV_VALUE_LEN];
 
-    // 1. initial set of all keys
-    let mut i = 0u32;
-    while i < KV_KEYS {
-        make_kv_key(&mut key, i);
-        make_kv_value(&mut value, i, 0);
-        if db.set(&key, &value).is_err() {
-            fail(b"kv_set\0", i);
-        }
-        m.kv_writes += 1;
-        i += 1;
-    }
-
-    // 2. update half of them
-    i = 0;
-    while i < KV_UPDATES {
-        make_kv_key(&mut key, i);
-        make_kv_value(&mut value, i, 1);
-        if db.set(&key, &value).is_err() {
-            fail(b"kv_update\0", i);
-        }
-        m.kv_writes += 1;
-        i += 1;
-    }
+    // 1. initial set of all keys, 2. update half of them
+    kv_put_range(db, KV_KEYS, 0);
+    m.kv_writes += KV_KEYS;
+    kv_put_range(db, KV_UPDATES, 1);
+    m.kv_writes += KV_UPDATES;
 
     // 3. GC churn: rewrite a small key set many times so the database has to
     //    erase and migrate sectors (same pattern as the C workload).
     let mut n = 0u32;
     while n < KV_CHURN {
-        let idx = n % KV_CHURN_KEYS;
-        make_kv_key(&mut key, idx);
-        make_kv_value(&mut value, idx, 2 + n);
-        if db.set(&key, &value).is_err() {
-            fail(b"kv_churn\0", n);
-        }
+        kv_put(db, n % KV_CHURN_KEYS, 2 + n);
         m.kv_writes += 1;
         n += 1;
     }
 
     // 4. get every key, verify and checksum its value (index order, so this
     //    checksum is implementation-order independent and matches the C side).
-    i = 0;
+    let mut i = 0u32;
     while i < KV_KEYS {
-        let gen = expected_gen(i);
-        let mut expected = [0u8; KV_VALUE_LEN];
-        make_kv_key(&mut key, i);
-        make_kv_value(&mut expected, i, gen);
-        match db.get(&key, &mut read_buf) {
-            Ok(Some(got)) if got == KV_VALUE_LEN => {}
-            _ => fail(b"kv_get_len\0", i),
-        }
-        if unsafe { memcmp(read_buf.as_ptr(), expected.as_ptr(), KV_VALUE_LEN) } != 0 {
-            fail(b"kv_get_data\0", i);
-        }
+        kv_get_verified(db, i, &mut read_buf);
         m.kv_gets += 1;
         m.kv_checksum = fnv1a(m.kv_checksum, &read_buf);
         i += 1;
@@ -834,21 +866,16 @@ fn kv_phase(m: &mut Metrics) {
     //    separately from kv_checksum.
     let mut it = db.iter();
     while let Some(entry) = it.next() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => fail(b"kv_iter\0", m.kv_iterated),
-        };
+        let entry = ok_or_fail(entry, TAG_KV_ITER);
         m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, entry.name());
-        let got = match it.read_value(&entry, &mut iter_buf) {
-            Ok(n) => n,
-            Err(_) => fail(b"kv_iter_read\0", m.kv_iterated),
-        };
-        m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, &iter_buf[..got]);
+        let got = ok_or_fail(it.read_value(&entry, &mut iter_buf), TAG_KV_ITER);
+        let got_slice = unsafe { core::slice::from_raw_parts(iter_buf.as_ptr(), got.min(iter_buf.len())) };
+        m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, got_slice);
         m.kv_iterated += 1;
     }
 
     if m.kv_iterated != KV_KEYS {
-        fail(b"kv_iter_count\0", m.kv_iterated);
+        fail(TAG_KV_ITER, m.kv_iterated);
     }
 }
 
@@ -871,9 +898,7 @@ fn tsdb_phase(m: &mut Metrics) {
     // append phase
     while i < TS_APPENDS {
         make_ts_payload(&mut payload, i);
-        if db.append((TS_BASE_TIME + i) as i32, &payload).is_err() {
-            fail(b"ts_append\0", i);
-        }
+        ok_or_fail(db.append((TS_BASE_TIME + i) as i32, &payload), TAG_TS_APPEND);
         m.ts_appends += 1;
         i += 1;
     }
@@ -882,23 +907,17 @@ fn tsdb_phase(m: &mut Metrics) {
     let mut it = db.iter();
     let mut n = 0u32;
     while let Some(entry) = it.next() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => fail(b"ts_iter\0", n),
-        };
-        let got = match it.read_blob(&entry, &mut read_buf) {
-            Ok(g) => g,
-            Err(_) => fail(b"ts_iter_read\0", n),
-        };
+        let entry = ok_or_fail(entry, TAG_TS_ITER);
+        let got = ok_or_fail(it.read_blob(&entry, &mut read_buf), TAG_TS_ITER);
         if got != TS_PAYLOAD_LEN {
-            fail(b"ts_iter_len\0", got as u32);
+            fail(TAG_TS_ITER, got as u32);
         }
         m.ts_iterated += 1;
         m.ts_checksum = fnv1a(m.ts_checksum, &read_buf[..got]);
         n += 1;
     }
     if n != TS_APPENDS {
-        fail(b"ts_iter_count\0", n);
+        fail(TAG_TS_ITER, n);
     }
 }
 
@@ -1013,53 +1032,41 @@ fn stack_diagnostics(m: &mut Metrics) {
     m.st_ts_iter = stack_high_water_bytes();
 }
 
+/// Emit "label + decimal value" (the RESULT line is a fixed sequence of these).
+#[inline(always)]
+fn emit(label: &[u8], value: u32) {
+    write_bytes(label);
+    write_u32(value);
+}
+
 #[inline(never)]
 fn print_result(m: &Metrics) {
-    write_bytes(b"RESULT text=\0");
-    write_u32(m.text);
-    write_bytes(b" rodata=\0");
-    write_u32(m.rodata);
-    write_bytes(b" data=\0");
-    write_u32(m.data);
-    write_bytes(b" bss=\0");
-    write_u32(m.bss);
-    write_bytes(b" sim_flash=\0");
-    write_u32(m.sim_flash);
-    write_bytes(b" stack=\0");
-    write_u32(m.stack);
-    write_bytes(b" stack_init=\0");
-    write_u32(m.stack_init);
-    write_bytes(b" stack_limit=\0");
-    write_u32(m.stack_limit);
+    emit(b"RESULT text=\0", m.text);
+    emit(b" rodata=\0", m.rodata);
+    emit(b" data=\0", m.data);
+    emit(b" bss=\0", m.bss);
+    emit(b" sim_flash=\0", m.sim_flash);
+    emit(b" stack=\0", m.stack);
+    emit(b" stack_init=\0", m.stack_init);
+    emit(b" stack_limit=\0", m.stack_limit);
     #[cfg(feature = "stack-phases")]
     {
-        write_bytes(b" st_set=\0");
-        write_u32(m.st_set);
-        write_bytes(b" st_get=\0");
-        write_u32(m.st_get);
-        write_bytes(b" st_iter=\0");
-        write_u32(m.st_iter);
-        write_bytes(b" st_gc=\0");
-        write_u32(m.st_gc);
-        write_bytes(b" st_ts_append=\0");
-        write_u32(m.st_ts_append);
-        write_bytes(b" st_ts_iter=\0");
-        write_u32(m.st_ts_iter);
+        emit(b" st_set=\0", m.st_set);
+        emit(b" st_get=\0", m.st_get);
+        emit(b" st_iter=\0", m.st_iter);
+        emit(b" st_gc=\0", m.st_gc);
+        emit(b" st_ts_append=\0", m.st_ts_append);
+        emit(b" st_ts_iter=\0", m.st_ts_iter);
     }
-    write_bytes(b" kv_writes=\0");
-    write_u32(m.kv_writes);
-    write_bytes(b" kv_gets=\0");
-    write_u32(m.kv_gets);
-    write_bytes(b" kv_iterated=\0");
-    write_u32(m.kv_iterated);
+    emit(b" kv_writes=\0", m.kv_writes);
+    emit(b" kv_gets=\0", m.kv_gets);
+    emit(b" kv_iterated=\0", m.kv_iterated);
     write_bytes(b" kv_checksum=\0");
     write_hex32(m.kv_checksum);
     write_bytes(b" kv_iter_checksum=\0");
     write_hex32(m.kv_iter_checksum);
-    write_bytes(b" ts_appends=\0");
-    write_u32(m.ts_appends);
-    write_bytes(b" ts_iterated=\0");
-    write_u32(m.ts_iterated);
+    emit(b" ts_appends=\0", m.ts_appends);
+    emit(b" ts_iterated=\0", m.ts_iterated);
     write_bytes(b" ts_checksum=\0");
     write_hex32(m.ts_checksum);
     write_bytes(b" rc=0\n\0");

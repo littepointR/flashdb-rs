@@ -443,3 +443,53 @@ fn works_with_64bit_timestamps() {
     assert_eq!(db.last_time(), BIG + 119);
     assert_eq!(db.iter().count(), 120);
 }
+
+/// Placement form: `mount_into` initializes a caller-provided slot without a
+/// whole `Tsdb` temporary, and the recovered database is fully usable.
+#[test]
+fn mount_into_roundtrip() {
+    use core::mem::MaybeUninit;
+
+    let mut slot = MaybeUninit::<Tsdb<Nor>>::uninit();
+    Tsdb::mount_into(
+        &mut slot,
+        Nor::new(SEC_SIZE),
+        Config::new(SEC_SIZE, MAX_SIZE),
+        MAX_LEN,
+    )
+    .unwrap();
+    // SAFETY: `mount_into` succeeded, so the slot is initialized.
+    let mut db = unsafe { slot.assume_init() };
+    db.append(1000, &payload(0, 32)).unwrap();
+    db.append(1001, &payload(1, 32)).unwrap();
+    assert_eq!(db.iter().count(), 2);
+    let flash = db.into_flash();
+
+    // Re-mount through the placement API from the same flash image.
+    let mut slot = MaybeUninit::<Tsdb<Nor>>::uninit();
+    Tsdb::mount_into(
+        &mut slot,
+        flash,
+        Config::new(SEC_SIZE, MAX_SIZE),
+        MAX_LEN,
+    )
+    .unwrap();
+    // SAFETY: `mount_into` succeeded.
+    let mut db = unsafe { slot.assume_init() };
+    assert_eq!(db.last_time(), 1001);
+    assert_eq!(db.max_len(), MAX_LEN);
+    let entries: Vec<_> = db.iter().map(|e| e.unwrap().time).collect();
+    assert_eq!(entries, vec![1000, 1001]);
+    let flash = db.into_flash();
+
+    // Errors are reported before the slot is handed back to the caller.
+    let mut slot = MaybeUninit::<Tsdb<Nor>>::uninit();
+    let err = Tsdb::mount_into(
+        &mut slot,
+        Nor::new(SEC_SIZE),
+        Config::new(SEC_SIZE, MAX_SIZE),
+        SEC_SIZE,
+    );
+    assert!(matches!(err, Err(Error::InvalidConfig)));
+    drop(flash);
+}

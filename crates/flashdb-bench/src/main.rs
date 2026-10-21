@@ -14,7 +14,7 @@
 //!
 //! The JSON is written to `harness/results/rust_wg<NN>_host.json`.
 
-use flashdb::{Config, Error, Flash, Kvdb, KvdbNoCache, KvdbSmallCache, Timestamp, Tsdb, TslStatus};
+use flashdb::{Config, Error, Flash, Kvdb, KvdbImpl, KvdbNoCache, KvdbSmallCache, Timestamp, Tsdb, TsdbImpl, TslStatus};
 use flashdb_sim::{RamFlash, SimError};
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
@@ -38,8 +38,19 @@ const BENCH_FNV32_PRIME: u32 = 0x0100_0193;
 // Instrumented flash
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default)]
 struct Counters {
+    reads: Cell<u64>,
+    read_bytes: Cell<u64>,
+    writes: Cell<u64>,
+    write_bytes: Cell<u64>,
+    erases: Cell<u64>,
+    erase_bytes: Cell<u64>,
+}
+
+/// Plain copy used for JSON/reporting.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CounterSnapshot {
     reads: u64,
     read_bytes: u64,
     writes: u64,
@@ -48,13 +59,35 @@ struct Counters {
     erase_bytes: u64,
 }
 
+impl Counters {
+    fn snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            reads: self.reads.get(),
+            read_bytes: self.read_bytes.get(),
+            writes: self.writes.get(),
+            write_bytes: self.write_bytes.get(),
+            erases: self.erases.get(),
+            erase_bytes: self.erase_bytes.get(),
+        }
+    }
+
+    fn reset(&self) {
+        self.reads.set(0);
+        self.read_bytes.set(0);
+        self.writes.set(0);
+        self.write_bytes.set(0);
+        self.erases.set(0);
+        self.erase_bytes.set(0);
+    }
+}
+
 struct BenchFlash<const WG: u32> {
     inner: RamFlash<FLASH_SIZE, WG>,
-    counters: Rc<Cell<Counters>>,
+    counters: Rc<Counters>,
 }
 
 impl<const WG: u32> BenchFlash<WG> {
-    fn new(counters: Rc<Cell<Counters>>) -> Self {
+    fn new(counters: Rc<Counters>) -> Self {
         Self {
             inner: RamFlash::<FLASH_SIZE, WG>::new(SEC_SIZE),
             counters,
@@ -69,10 +102,10 @@ impl<const WG: u32> Flash for BenchFlash<WG> {
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
         let result = self.inner.read(addr, buf);
         if result.is_ok() {
-            let mut c = self.counters.get();
-            c.reads += 1;
-            c.read_bytes += buf.len() as u64;
-            self.counters.set(c);
+            self.counters.reads.set(self.counters.reads.get() + 1);
+            self.counters
+                .read_bytes
+                .set(self.counters.read_bytes.get() + buf.len() as u64);
         }
         result
     }
@@ -80,10 +113,10 @@ impl<const WG: u32> Flash for BenchFlash<WG> {
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), Self::Error> {
         let result = self.inner.write(addr, buf);
         if result.is_ok() {
-            let mut c = self.counters.get();
-            c.writes += 1;
-            c.write_bytes += buf.len() as u64;
-            self.counters.set(c);
+            self.counters.writes.set(self.counters.writes.get() + 1);
+            self.counters
+                .write_bytes
+                .set(self.counters.write_bytes.get() + buf.len() as u64);
         }
         result
     }
@@ -91,10 +124,10 @@ impl<const WG: u32> Flash for BenchFlash<WG> {
     fn erase(&mut self, addr: u32, len: u32) -> Result<(), Self::Error> {
         let result = self.inner.erase(addr, len);
         if result.is_ok() {
-            let mut c = self.counters.get();
-            c.erases += 1;
-            c.erase_bytes += len as u64;
-            self.counters.set(c);
+            self.counters.erases.set(self.counters.erases.get() + 1);
+            self.counters
+                .erase_bytes
+                .set(self.counters.erase_bytes.get() + len as u64);
         }
         result
     }
@@ -261,7 +294,7 @@ struct Scenario {
     ns_per_op: f64,
     checksum: u32,
     errcodes: Errcodes,
-    flash: Counters,
+    flash: CounterSnapshot,
     extra: Vec<(&'static str, ExtraVal)>,
 }
 
@@ -371,16 +404,14 @@ impl Scenario {
 // Snapshot checksums (identical definitions to the C harness)
 // ---------------------------------------------------------------------------
 
-fn kv_snapshot_checksum<const WG: u32>(
-    db: &mut Kvdb<BenchFlash<WG>>,
-) -> (u32, u32, u64) {
+fn kv_snapshot_checksum<F: Flash>(db: &mut KvdbImpl<F, 64>) -> (u32, u32, u64) {
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     {
         let mut it = db.iter();
         while let Some(entry) = it.next() {
-            let entry = entry.expect("kv snapshot iterator");
+            let entry = match entry { Ok(e) => e, Err(_) => panic!("kv snapshot iterator") };
             let mut value = vec![0u8; entry.value_len as usize];
-            let n = it.read_value(&entry, &mut value).expect("kv snapshot read");
+            let n = match it.read_value(&entry, &mut value) { Ok(n) => n, Err(_) => panic!("kv snapshot read") };
             value.truncate(n);
             entries.push((entry.name().to_vec(), value));
         }
@@ -400,21 +431,19 @@ fn kv_snapshot_checksum<const WG: u32>(
     (h, count, value_bytes)
 }
 
-fn ts_snapshot_checksum<const WG: u32>(
-    db: &mut Tsdb<BenchFlash<WG>>,
-) -> (u32, u32, u64) {
+fn ts_snapshot_checksum<F: Flash>(db: &mut TsdbImpl<F, i32>) -> (u32, u32, u64) {
     let mut h = BENCH_FNV32_OFFSET;
     let mut count = 0u32;
     let mut payload_bytes = 0u64;
     {
         let mut it = db.iter();
         while let Some(entry) = it.next() {
-            let entry = entry.expect("ts snapshot iterator");
+            let entry = match entry { Ok(e) => e, Err(_) => panic!("ts snapshot iterator") };
             h = fnv_u32(h, entry.status as u32);
             h = fnv_u32(h, entry.time.to_i64() as u32);
             h = fnv_u32(h, entry.log_len);
             let mut buf = vec![0u8; entry.log_len as usize];
-            let n = it.read_blob(&entry, &mut buf).expect("ts snapshot read");
+            let n = match it.read_blob(&entry, &mut buf) { Ok(n) => n, Err(_) => panic!("ts snapshot read") };
             h = fnv_bytes(h, &buf[..n]);
             count += 1;
             payload_bytes += n as u64;
@@ -443,19 +472,19 @@ where
     let mut samples = Vec::with_capacity(runs as usize);
     let mut last_body = BodyOut::default();
     let mut last_finish = FinishOut::default();
-    let mut last_flash = Counters::default();
-    let mut first_flash: Option<Counters> = None;
+    let mut last_flash = CounterSnapshot::default();
+    let mut first_flash: Option<CounterSnapshot> = None;
     let mut flash_consistent = true;
     for _ in 0..runs {
-        let counters = Rc::new(Cell::new(Counters::default()));
+        let counters = Rc::new(Counters::default());
         let flash = BenchFlash::<WG>::new(counters.clone());
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv mount");
         setup(&mut db);
-        counters.set(Counters::default());
+        counters.reset();
         let start = Instant::now();
         let body_out = body(&mut db);
         let elapsed = start.elapsed().as_nanos() as u64;
-        let flash_out = counters.get();
+        let flash_out = counters.snapshot();
         let finish_out = finish(&mut db);
         samples.push(elapsed);
         last_body = body_out;
@@ -511,20 +540,20 @@ where
     let mut samples = Vec::with_capacity(runs as usize);
     let mut last_body = BodyOut::default();
     let mut last_finish = FinishOut::default();
-    let mut last_flash = Counters::default();
-    let mut first_flash: Option<Counters> = None;
+    let mut last_flash = CounterSnapshot::default();
+    let mut first_flash: Option<CounterSnapshot> = None;
     let mut flash_consistent = true;
     for _ in 0..runs {
-        let counters = Rc::new(Cell::new(Counters::default()));
+        let counters = Rc::new(Counters::default());
         let flash = BenchFlash::<WG>::new(counters.clone());
         let mut db =
             Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("ts mount");
         setup(&mut db);
-        counters.set(Counters::default());
+        counters.reset();
         let start = Instant::now();
         let body_out = body(&mut db);
         let elapsed = start.elapsed().as_nanos() as u64;
-        let flash_out = counters.get();
+        let flash_out = counters.snapshot();
         let finish_out = finish(&mut db);
         samples.push(elapsed);
         last_body = body_out;
@@ -567,19 +596,19 @@ where
 /// the checksum (KV) or the pre-mount state is captured by the caller (TS).
 fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
     let mut samples = Vec::with_capacity(runs as usize);
-    let mut last_flash = Counters::default();
+    let mut last_flash = CounterSnapshot::default();
     let mut errcodes = Errcodes::default();
     let mut mount_ok = 0u64;
     let mut checksum = 0u32;
     let mut entries = 0u32;
     let mut value_bytes = 0u64;
     for _ in 0..runs {
-        let counters = Rc::new(Cell::new(Counters::default()));
+        let counters = Rc::new(Counters::default());
         let flash = BenchFlash::<WG>::new(counters.clone());
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv mount");
         setup_32_keys(&mut db);
         let mut holder = Some(db.into_flash());
-        counters.set(Counters::default());
+        counters.reset();
         let start = Instant::now();
         let mut run_ok = 0u64;
         for _ in 0..100 {
@@ -597,7 +626,7 @@ fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
         }
         let elapsed = start.elapsed().as_nanos() as u64;
         samples.push(elapsed);
-        last_flash = counters.get();
+        last_flash = counters.snapshot();
         mount_ok = run_ok;
         let flash = holder.take().expect("flash after mounts");
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv remount");
@@ -630,17 +659,17 @@ fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
 // KV scenario data/setup/body
 // ---------------------------------------------------------------------------
 
-fn setup_32_keys<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) {
+fn setup_32_keys<F: Flash>(db: &mut KvdbImpl<F, 64>) {
     let mut key = [0u8; 16];
     let mut value = [0u8; 32];
     for i in 0..32u32 {
         let klen = key_num(b"key", i, &mut key);
         kv_value(0x33, i, 32, &mut value);
-        db.set(&key[..klen], &value).expect("setup set");
+        if db.set(&key[..klen], &value).is_err() { panic!("setup set"); }
     }
 }
 
-fn kv_setup_hot<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) {
+fn kv_setup_hot<F: Flash>(db: &mut KvdbImpl<F, 64>) {
     setup_32_keys(db);
     let mut key = [0u8; 16];
     let mut buf = [0u8; 64];
@@ -650,7 +679,7 @@ fn kv_setup_hot<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) {
     }
 }
 
-fn kv_finish_state<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) -> FinishOut {
+fn kv_finish_state<F: Flash>(db: &mut KvdbImpl<F, 64>) -> FinishOut {
     let (checksum, count, value_bytes) = kv_snapshot_checksum(db);
     FinishOut {
         checksum,
@@ -795,7 +824,7 @@ fn kv_large_body<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) -> BodyOut {
 // TS scenario data/setup/body
 // ---------------------------------------------------------------------------
 
-fn ts_populate_full<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>) -> u32 {
+fn ts_populate_full<F: Flash>(db: &mut TsdbImpl<F, i32>) -> u32 {
     let mut payload = [0u8; TS_PAYLOAD_LEN];
     let mut count = 0u32;
     for i in 0..TS_APPEND_MAX_CALLS {
@@ -808,12 +837,12 @@ fn ts_populate_full<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>) -> u32 {
     count
 }
 
-fn ts_setup_full<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>) {
+fn ts_setup_full<F: Flash>(db: &mut TsdbImpl<F, i32>) {
     db.set_rollover(false);
     ts_populate_full(db);
 }
 
-fn ts_finish_snapshot<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>) -> FinishOut {
+fn ts_finish_snapshot<F: Flash>(db: &mut TsdbImpl<F, i32>) -> FinishOut {
     let (checksum, count, payload_bytes) = ts_snapshot_checksum(db);
     FinishOut {
         checksum,
@@ -1019,7 +1048,7 @@ fn run_kv_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
         runs,
         |_db| {},
         kv_set_small_body::<WG>,
-        kv_finish_state::<WG>,
+        kv_finish_state,
     ));
     v.push(bench_kv::<WG, _, _, _>(
         "kv_update_1k",
@@ -1051,30 +1080,30 @@ fn run_kv_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
     v.push(bench_kv::<WG, _, _, _>(
         "kv_get_hot",
         runs,
-        kv_setup_hot::<WG>,
+        kv_setup_hot,
         kv_get_hot_body::<WG>,
-        kv_finish_state::<WG>,
+        kv_finish_state,
     ));
     v.push(bench_kv::<WG, _, _, _>(
         "kv_get_miss",
         runs,
-        kv_setup_hot::<WG>,
+        kv_setup_hot,
         kv_get_miss_body::<WG>,
-        kv_finish_state::<WG>,
+        kv_finish_state,
     ));
     v.push(bench_kv::<WG, _, _, _>(
         "kv_delete",
         runs,
-        kv_setup_hot::<WG>,
+        kv_setup_hot,
         kv_delete_body::<WG>,
-        kv_finish_state::<WG>,
+        kv_finish_state,
     ));
     v.push(bench_kv::<WG, _, _, _>(
         "kv_iterate",
         runs,
-        kv_setup_hot::<WG>,
+        kv_setup_hot,
         kv_iterate_body::<WG>,
-        kv_finish_state::<WG>,
+        kv_finish_state,
     ));
     v.push(bench_kv_mount::<WG>(runs));
     v.push(bench_kv::<WG, _, _, _>(
@@ -1082,7 +1111,7 @@ fn run_kv_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
         runs,
         |_db| {},
         kv_large_body::<WG>,
-        kv_finish_state::<WG>,
+        kv_finish_state,
     ));
     // Fill in gc_sector_erases from the recorded flash counters (C reports the
     // erase count of the measured phase).
@@ -1099,7 +1128,7 @@ fn run_kv_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
 }
 
 fn ts_probe_capacity<const WG: u32>() -> u32 {
-    let counters = Rc::new(Cell::new(Counters::default()));
+    let counters = Rc::new(Counters::default());
     let flash = BenchFlash::<WG>::new(counters);
     let mut db =
         Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("probe mount");
@@ -1116,28 +1145,28 @@ fn run_ts_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
         runs,
         |db| db.set_rollover(false),
         ts_append_body::<WG>,
-        ts_finish_snapshot::<WG>,
+        ts_finish_snapshot,
     ));
     v.push(bench_ts::<WG, _, _, _>(
         "tsl_append_rollover",
         runs,
         |db| db.set_rollover(true),
         move |db| ts_rollover_body::<WG>(db, capacity),
-        ts_finish_snapshot::<WG>,
+        ts_finish_snapshot,
     ));
     v.push(bench_ts::<WG, _, _, _>(
         "tsl_iter_fwd",
         runs,
-        ts_setup_full::<WG>,
+        ts_setup_full,
         |db| ts_iter_body(db, false),
-        ts_finish_snapshot::<WG>,
+        ts_finish_snapshot,
     ));
     v.push(bench_ts::<WG, _, _, _>(
         "tsl_iter_rev",
         runs,
-        ts_setup_full::<WG>,
+        ts_setup_full,
         |db| ts_iter_body(db, true),
-        ts_finish_snapshot::<WG>,
+        ts_finish_snapshot,
     ));
 
     let counts = Rc::new(RefCell::new(Vec::new()));
@@ -1145,7 +1174,7 @@ fn run_ts_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
     v.push(bench_ts::<WG, _, _, _>(
         "tsl_by_time",
         runs,
-        ts_setup_full::<WG>,
+        ts_setup_full,
         move |db| ts_by_time_body_mode::<WG>(db, body_counts.clone()),
         move |_db| FinishOut {
             checksum: range_checksum(&counts.borrow()),
@@ -1158,7 +1187,7 @@ fn run_ts_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
     v.push(bench_ts::<WG, _, _, _>(
         "tsl_query_count",
         runs,
-        ts_setup_full::<WG>,
+        ts_setup_full,
         move |db| ts_query_count_body::<WG>(db, body_counts2.clone()),
         move |_db| FinishOut {
             checksum: range_checksum(&counts2.borrow()),
@@ -1170,7 +1199,7 @@ fn run_ts_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
     v.push(bench_ts::<WG, _, _, _>(
         "tsl_clean",
         runs,
-        ts_setup_full::<WG>,
+        ts_setup_full,
         |db| {
             let mut out = BodyOut::default();
             let mut appends = 0u32;
@@ -1184,20 +1213,20 @@ fn run_ts_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
                 .push(("appends_per_cycle", ExtraVal::U(appends as u64)));
             out
         },
-        ts_finish_snapshot::<WG>,
+        ts_finish_snapshot,
     ));
     v
 }
 
 fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
     let mut samples = Vec::with_capacity(runs as usize);
-    let mut last_flash = Counters::default();
+    let mut last_flash = CounterSnapshot::default();
     let mut errcodes = Errcodes::default();
     let mut mount_ok = 0u64;
     let mut checksum = 0u32;
     let mut populated = 0u32;
     for _ in 0..runs {
-        let counters = Rc::new(Cell::new(Counters::default()));
+        let counters = Rc::new(Counters::default());
         let flash = BenchFlash::<WG>::new(counters.clone());
         let mut db =
             Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("ts mount");
@@ -1207,7 +1236,7 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
         // so the functional checksum is taken from the pre-mount state.
         checksum = ts_snapshot_checksum(&mut db).0;
         let mut holder = Some(db.into_flash());
-        counters.set(Counters::default());
+        counters.reset();
         let start = Instant::now();
         let mut run_ok = 0u64;
         for _ in 0..50 {
@@ -1225,7 +1254,7 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
         }
         let elapsed = start.elapsed().as_nanos() as u64;
         samples.push(elapsed);
-        last_flash = counters.get();
+        last_flash = counters.snapshot();
         mount_ok = run_ok;
     }
     let median_ns = median(&mut samples);
