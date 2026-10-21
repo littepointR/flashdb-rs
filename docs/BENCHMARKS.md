@@ -95,10 +95,10 @@ in both images, so it counts as neither ROM nor MCU RAM.
 
 | metric | C FlashDB (-Os) | Rust `opt-level="s"` | Rust `opt-level="z"` |
 |---|---:|---:|---:|
-| `.text` | 9 720 B | 14 268 B | 12 724 B |
+| `.text` | 9 720 B | 14 188 B | 12 676 B |
 | `.rodata` | 1 632 B | 1 448 B | 1 448 B |
 | `.data` | 56 B | 0 | 0 |
-| **ROM total** | **11 408 B** | **15 716 B** (+38%) | **14 172 B** (+24%) |
+| **ROM total** | **11 408 B** | **15 636 B** (+37%) | **14 124 B** (+24%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
 | stack high-water | 1 192 B | 1 312 B | 1 432 B |
@@ -124,10 +124,10 @@ on-flash format and behaviour identical:
 
 | configuration | ROM (`-z`) | trade-off |
 |---|---:|---|
-| default (256-byte CRC table) | 14 172 B | reference build (stable toolchain) |
-| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 13 224 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
-| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 540 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
-| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 588 B (+10%)** | smallest measured; nightly toolchain |
+| default (256-byte CRC table) | 14 124 B | reference build (stable toolchain) |
+| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 13 176 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
+| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 496 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
+| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 544 B (+10%)** | smallest measured; nightly toolchain |
 
 ### Interpretation
 
@@ -186,7 +186,7 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 83 tests green |
 | performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 936 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 14 448 B vs 11 408 B (`-z`); 13 224 B with `small-crc`, 12 588 B in the smallest measured nightly build (+10%) |
+| ROM at least C | **not achieved** — 14 448 B vs 11 408 B (`-z`); 13 176 B with `small-crc`, 12 544 B in the smallest measured nightly build (+10%) |
 
 ROM remains the one open objective. Because the default build prioritises
 performance and C compatibility, the size levers above are opt-in; the next

@@ -391,7 +391,8 @@ pub struct KvIterator<'a, F: Flash, const CACHE: usize> {
     sector_addr: u32,
     traversed_len: u32,
     next_addr: u32,
-    sec: SecInfo,
+    /// Exclusive end address of the sector currently being iterated.
+    sec_end: u32,
     in_sector: bool,
     done: bool,
 }
@@ -888,15 +889,15 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
     }
 
-    /// Given a sector and a record, compute the next record address, like
-    /// `get_next_kv_addr()` in C.
-    fn advance_kv(&mut self, sec: &SecInfo, hdr: &KvHeader) -> Result<u32, F::Error> {
+    /// Given the end address of the sector containing `hdr`, compute the next
+    /// record address, like `get_next_kv_addr()` in C.
+    ///
+    /// `sec_end` is exclusive (`sector_addr + sector_size`). Callers only walk
+    /// sectors whose store status is USING or FULL, so the empty-sector check
+    /// C performs in `get_next_kv_addr()` is not needed here.
+    fn advance_kv(&mut self, sec_end: u32, hdr: &KvHeader) -> Result<u32, F::Error> {
         let lay = self.lay();
-        let sec_size = self.storage.sec_size();
-        if sec.store == SectorStoreStatus::Empty {
-            return Ok(FAILED_ADDR);
-        }
-        if hdr.addr > sec.addr.saturating_add(sec_size) || hdr.len == 0 {
+        if hdr.addr > sec_end || hdr.len == 0 {
             return Ok(FAILED_ADDR);
         }
         if hdr.valid {
@@ -906,10 +907,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             // header is damaged (see below), which removes one flash read per
             // record from every traversal.
             let next = hdr.addr + hdr.len;
-            if next < sec.addr + sec_size {
-                return Ok(next);
-            }
-            return Ok(FAILED_ADDR);
+            return Ok(if next < sec_end { next } else { FAILED_ADDR });
         }
         if hdr.erased {
             // Trailing erased area: no more records.
@@ -917,9 +915,9 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
         // Damaged record: fall back to scanning for the next magic word.
         let start = hdr.addr + wg_align(1, self.wg()) as u32;
-        let end = sec.addr + sec_size - lay.sec_hdr_size;
+        let end = sec_end - lay.sec_hdr_size;
         let addr = self.find_next_kv_addr(start, end)?;
-        if addr == FAILED_ADDR || addr > sec.addr + sec_size {
+        if addr == FAILED_ADDR || addr > sec_end {
             Ok(FAILED_ADDR)
         } else {
             Ok(addr)
@@ -974,7 +972,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 }
                 sec.empty_kv += hdr.len;
                 sec.remain = sec.remain.saturating_sub(hdr.len);
-                let next = self.advance_kv(&sec, &hdr)?;
+                let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
                 if next == FAILED_ADDR {
                     break;
                 }
@@ -1353,7 +1351,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                             return Ok(Some(entry));
                         }
                     }
-                    let next = self.advance_kv(&sec, &hdr)?;
+                    let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
                     if next == FAILED_ADDR {
                         break;
                     }
@@ -1548,7 +1546,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 let name = self.read_name(&hdr)?;
                 self.move_kv(&hdr, &name[..hdr.name_len as usize])?;
             }
-            let next = self.advance_kv(sec, &hdr)?;
+            let next = self.advance_kv(sec.addr + self.storage.sec_size(), &hdr)?;
             if next == FAILED_ADDR {
                 break;
             }
@@ -1707,7 +1705,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                         }
                         _ => {}
                     }
-                    let next = self.advance_kv(&sec, &hdr)?;
+                    let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
                     if next == FAILED_ADDR {
                         break;
                     }
@@ -1837,7 +1835,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                         let mut scratch = [0u8; 8];
                         self.read_value_verified(&entry, None, &mut scratch)?;
                     }
-                    let next = self.advance_kv(&sec, &hdr)?;
+                    let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
                     if next == FAILED_ADDR {
                         break;
                     }
@@ -1871,7 +1869,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             sector_addr: self.storage.oldest_addr,
             traversed_len: 0,
             next_addr: FAILED_ADDR,
-            sec: SecInfo::UNKNOWN,
+            sec_end: 0,
             in_sector: false,
             done: false,
             db: self,
@@ -1919,7 +1917,7 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
                     && (sec.store == SectorStoreStatus::Using
                         || sec.store == SectorStoreStatus::Full)
                 {
-                    self.sec = sec;
+                    self.sec_end = sec.addr + sec_size;
                     self.next_addr = sec.addr + lay.sec_hdr_size;
                     self.in_sector = true;
                 } else {
@@ -1937,7 +1935,7 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
                     return Some(Err(e));
                 }
             };
-            let next = match self.db.advance_kv(&self.sec, &hdr) {
+            let next = match self.db.advance_kv(self.sec_end, &hdr) {
                 Ok(next) => next,
                 Err(e) => {
                     self.done = true;
