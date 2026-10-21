@@ -174,7 +174,7 @@ image (KV + TS partitions), then each implementation mounts the other's image.
   (granules 1…256 bits) → 0 mismatches, plus 31 corrupted-image read/write
   variants where C and Rust outputs are identical.
 
-`cargo test -p flashdb --release` runs 83 tests plus 7 doctests, including the
+`cargo test -p flashdb --release` runs 90 tests (83 test functions + 7 doctests), including the
 original C test cases ported assertion-for-assertion
 (`kvdb_c_parity.rs`, `tsdb_c_parity.rs`), byte-level layout tests for all six
 write granularities, crash recovery, rollover and iteration boundary cases.
@@ -183,10 +183,10 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 
 | objective | result |
 |---|---|
-| functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 83 tests green |
+| functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 90 tests green |
 | performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
-| RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 936 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 14 448 B vs 11 408 B (`-z`); 13 012 B with `small-crc`, 12 384 B in the smallest measured nightly build (+9%) |
+| RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 920 B vs 2 256 B (`-s`) |
+| ROM at least C | **not achieved** — 13 960 B vs 11 408 B (`-z`); 13 012 B with `small-crc`, 12 384 B in the smallest measured nightly build (+8.6%) |
 
 ROM remains the one open objective. Because the default build prioritises
 performance and C compatibility, the size levers above are opt-in; the next
