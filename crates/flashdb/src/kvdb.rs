@@ -1085,46 +1085,53 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         {
             return Ok(self.cur_sec.empty_kv);
         }
-        let (empty, using, _) = self.sector_statistics()?;
-        if using > 0 {
-            if let Some(sec) = self.find_alloc_candidate(SectorStoreStatus::Using, kv_size)? {
+        let (_, _, candidate) = self.alloc_scan(kv_size)?;
+        match candidate {
+            Some(sec) => {
                 self.cur_sec = sec;
-                return Ok(sec.empty_kv);
+                Ok(sec.empty_kv)
             }
+            None => Ok(FAILED_ADDR),
         }
-        if empty > 0 {
-            if empty > GC_EMPTY_SEC_THRESHOLD || self.gc_request {
-                if let Some(sec) = self.find_alloc_candidate(SectorStoreStatus::Empty, kv_size)? {
-                    self.cur_sec = sec;
-                    return Ok(sec.empty_kv);
-                }
-            } else {
-                self.gc_request = true;
-            }
-        }
-        Ok(FAILED_ADDR)
     }
 
-    fn find_alloc_candidate(
-        &mut self,
-        status: SectorStoreStatus,
-        kv_size: u32,
-    ) -> Result<Option<SecInfo>, F::Error> {
+    /// One pass over the sector ring that computes the EMPTY/USING counts and
+    /// locates the first allocation candidate (preferring USING sectors), so
+    /// `alloc_kv` does not need a separate statistics scan.
+    fn alloc_scan(&mut self, kv_size: u32) -> Result<(u32, u32, Option<SecInfo>), F::Error> {
         let lay = self.lay();
         let threshold = lay.sec_remain_threshold;
         let sec_size = self.storage.sec_size();
+        let mut empty = 0u32;
+        let mut using = 0u32;
+        let mut first_empty: Option<u32> = None;
+        let mut using_cand: Option<SecInfo> = None;
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
             traversed += sec_size;
             let sec = self.read_sector_info(addr, false)?;
-            if sec.check_ok && sec.store == status {
-                let sec = self.read_sector_info(addr, true)?;
-                if sec.remain > kv_size + threshold
-                    && (sec.dirty == SectorDirtyStatus::False
-                        || (sec.dirty == SectorDirtyStatus::True && !self.gc_request))
-                {
-                    return Ok(Some(sec));
+            if sec.check_ok {
+                match sec.store {
+                    SectorStoreStatus::Empty => {
+                        empty += 1;
+                        if first_empty.is_none() {
+                            first_empty = Some(sec.addr);
+                        }
+                    }
+                    SectorStoreStatus::Using => {
+                        using += 1;
+                        if using_cand.is_none() {
+                            let t = self.read_sector_info(addr, true)?;
+                            if t.remain > kv_size + threshold
+                                && (t.dirty == SectorDirtyStatus::False
+                                    || (t.dirty == SectorDirtyStatus::True && !self.gc_request))
+                            {
+                                using_cand = Some(t);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             addr = self.next_sector_addr(&sec, traversed);
@@ -1132,11 +1139,29 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 break;
             }
         }
-        Ok(None)
+        let candidate = match using_cand {
+            Some(sec) => Some(sec),
+            None => match first_empty {
+                Some(empty_addr)
+                    if empty > GC_EMPTY_SEC_THRESHOLD || self.gc_request =>
+                {
+                    let t = self.read_sector_info(empty_addr, true)?;
+                    if t.remain > kv_size + threshold {
+                        Some(t)
+                    } else {
+                        None
+                    }
+                }
+                Some(_) => {
+                    self.gc_request = true;
+                    None
+                }
+                None => None,
+            },
+        };
+        Ok((empty, using, candidate))
     }
 
-    /// Count EMPTY/USING sectors. Also returns the address of the last EMPTY
-    /// sector in scan order, which GC needs for C's stop-check heuristic.
     fn sector_statistics(&mut self) -> Result<(u32, u32, u32), F::Error> {
         let sec_size = self.storage.sec_size();
         let mut empty = 0u32;
