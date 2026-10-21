@@ -1,0 +1,45 @@
+[package]
+name = "flashdb-firmware"
+description = "Bare-metal Cortex-M3 measurement firmware: Rust flashdb crate on a RAM flash simulator"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Stand-alone workspace: this crate is measurement firmware, not a library
+# member of the repo workspace.  It builds for thumbv7m-none-eabi and needs a
+# custom linker script, so it must not inherit the workspace profiles.
+[workspace]
+
+[[bin]]
+name = "fw-rust"
+path = "main.rs"
+
+[dependencies]
+# Real Rust rewrite under measurement (no_std, no external dependencies).
+# NOTE: the firmware implements flashdb::Flash directly over the .sim_flash
+# NOLOAD region (main.rs) instead of using flashdb-sim::RamFlash, because
+# RamFlash owns its 16 KiB buffer by value -- in a bare-metal image that buffer
+# would land in .data (16 KiB of ROM) and in the static-RAM metric.  The
+# flashdb-sim crate remains the simulator for host benchmarks/tests.
+flashdb = { path = "../../../crates/flashdb" }
+
+# Size-oriented profile matching the C firmware's -Os (no LTO, one CGU).
+# scripts/fw_rust.sh builds this profile by default; select the `size`
+# profile for the smaller opt-level="z" + LTO variant.
+[profile.release]
+opt-level = "s"
+# LTO is required for dead-code elimination here: stable rustc emits the whole
+# crate in one .text section (no per-function sections), so without LTO the
+# linker cannot drop unused code such as the not-yet-used TSDB module.
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+overflow-checks = false
+debug-assertions = false
+
+[profile.size]
+inherits = "release"
+opt-level = "z"
+lto = true

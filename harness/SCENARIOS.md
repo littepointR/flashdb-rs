@@ -112,3 +112,37 @@ compatibility**:
 * firmware: thumbv7m-none-eabi, `-Os` (C) vs `opt-level="s"` (Rust):
   `.text`, `.rodata`, `.data`, `.bss`, stack high-water (QEMU semihosting
   harness), running the identical scenario driver.
+
+## Appendix: exact data generation (normative)
+
+The following formulas are normative for both harnesses; both `scripts/c_bench.sh`
+and `cargo run -p flashdb-bench --release` must use them verbatim so the reported
+`checksum` values are comparable.
+
+```
+fnv1a32(bytes) = { h=0x811C9DC5; for b in bytes { h ^= b; h = h*0x01000193 mod 2^32 } }
+kv_value(seed, i, len)[j] = (u8)(seed + i*31 + j*7)
+ts_payload(i)[j]          = (u8)(0x5A + i*13 + j*5)
+```
+
+| scenario | data |
+|---|---|
+| kv_set_small | k=0..63: key=`"kv{k%8}"`, value=`kv_value(0x11,k,8)` |
+| kv_update_1k | setup `"counter"=kv_value(0x22,0,32)`; k=0..999 set `"counter"`=`kv_value(0x22,k,32)` |
+| kv_get_hot | setup i=0..31: key=`"key{i}"`, value=`kv_value(0x33,i,32)`; warmup 128 gets `key{i%32}`; measured 2000 gets `key{k%32}` into 64-byte buffer |
+| kv_get_miss | same setup as kv_get_hot; 500 gets `"absent{k}"` |
+| kv_delete | setup 32 keys as kv_get_hot; 3 rounds × 32 × { delete key_i; set key_i = kv_value(0x33,i,32) } |
+| kv_iterate | setup 32 keys as kv_get_hot; 100 × iterate, sum `value_len`, count entries, do not read values |
+| kv_mount | setup 32 keys as kv_get_hot; 100 × (deinit + mount) over unchanged flash |
+| kv_large | k=0..49 set `"big"` = `kv_value(0x44,k,1024)` |
+| tsl_append | rollover off; append payload(i) with `t=1000+i` until `SavedFull` or 4000 appends |
+| tsl_append_rollover | rollover on; `3 * max_blob_count` appends |
+| tsl_iter_fwd / tsl_iter_rev | populate to full (rollover off), then 20 × full iterate (sum log_len, count) |
+| tsl_by_time | populate to full; 500 × by-time iterate with LCG ranges below |
+| tsl_query_count | populate to full; 500 × query_count(range, Write) |
+| tsl_mount | populate to full; 50 × (deinit + mount) |
+| tsl_clean | populate to full; 20 × (clean + repopulate to full) |
+
+By-time LCG: `state=12345`; per query do two steps
+`state = (state*1103515245 + 12345) mod 2^31`;
+`off = state % 3000`; `len = 50 + next % 451`; `from = 1000 + off`; `to = from + len`.

@@ -135,11 +135,15 @@ impl SectorDirtyStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TslStatus {
+    /// Never used / erased.
     Unused = 0,
+    /// Index header is being written (power-loss marker).
     PreWrite = 1,
+    /// Committed record.
     Write = 2,
     /// User defined status 1.
     UserStatus1 = 3,
+    /// Deleted record.
     Deleted = 4,
     /// User defined status 2.
     UserStatus2 = 5,
