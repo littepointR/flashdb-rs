@@ -45,43 +45,41 @@ scripts/fw_c.sh && scripts/fw_rust.sh    # Cortex-M3/QEMU ROM+RAM+stack
 
 | scenario | ops | ns/op C | ns/op Rust | ratio | reads C | reads Rust | writes C | writes Rust | erases C | erases Rust | weighted C | weighted Rust | checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| kv_set_small | 64 | 593.8 | 180.3 | 0.30x | 442 | 213 | 434 | 434 | 0 | 0 | 30,400 | 25,803 | same |
-| kv_update_1k | 1000 | 867.0 | 449.7 | 0.52x | 11,146 | 7,854 | 7,089 | 7,089 | 14 | 14 | 6,598,538 | 6,562,976 | same |
-| kv_get_hot | 2000 | 316.5 | 203.1 | 0.64x | 12,000 | 8,000 | 0 | 0 | 0 | 0 | 330,740 | 138,740 | same |
-| kv_get_miss | 500 | 4,280.0 | 970.7 | 0.23x | 79,500 | 18,500 | 0 | 0 | 0 | 0 | 1,606,000 | 502,000 | same |
-| kv_delete | 192 | 5,927.1 | 1,312.3 | 0.22x | 38,571 | 10,283 | 580 | 580 | 0 | 0 | 838,162 | 300,515 | same |
-| kv_iterate | 100 | 4,390.0 | 1,195.8 | 0.27x | 15,900 | 6,900 | 0 | 0 | 0 | 0 | 321,200 | 115,400 | same |
-| kv_mount | 100 | 6,380.0 | 1,012.9 | 0.16x | 23,300 | 4,500 | 0 | 0 | 0 | 0 | 553,200 | 116,400 | same |
-| kv_large | 50 | 8,340.0 | 4,707.5 | 0.56x | 3,391 | 2,914 | 438 | 438 | 14 | 14 | 6,363,544 | 6,346,273 | same |
-| tsl_append | 308 | 51.9 | 31.1 | 0.60x | 3 | 3 | 1,260 | 1,260 | 0 | 0 | 142,452 | 142,452 | same |
-| tsl_append_rollover | 924 | 50.9 | 32.6 | 0.64x | 19 | 19 | 3,791 | 3,791 | 8 | 8 | 3,704,886 | 3,704,886 | same |
-| tsl_iter_fwd | 20 | 3,400.0 | 4,579.1 | 1.35x | 6,240 | 6,240 | 0 | 0 | 0 | 0 | 126,720 | 126,720 | same |
-| tsl_iter_rev | 20 | 3,400.0 | 5,131.2 | 1.51x | 6,240 | 6,240 | 0 | 0 | 0 | 0 | 126,720 | 126,720 | same |
-| tsl_by_time | 500 | 274.0 | 448.4 | 1.64x | 10,069 | 10,069 | 0 | 0 | 0 | 0 | 249,188 | 249,188 | same |
-| tsl_query_count | 500 | 274.0 | 368.7 | 1.35x | 10,069 | 10,069 | 0 | 0 | 0 | 0 | 249,188 | 249,188 | same |
-| tsl_mount | 50 | 180.0 | 176.7 | 0.98x | 400 | 400 | 0 | 0 | 0 | 0 | 17,600 | 17,600 | same |
-| tsl_clean | 20 | 16,350.0 | 8,825.0 | 0.54x | 160 | 160 | 25,360 | 25,360 | 80 | 80 | 35,625,440 | 35,625,440 | same |
-## 3. Host benchmark — write granularity 1 (bit-level NOR)
+| kv_set_small | 64 | 687.5 | 139.3 | 0.20x | 442 | 213 | 434 | 434 | 0 | 0 | 30,400 | 25,803 | same |
+| kv_update_1k | 1000 | 659.0 | 338.9 | 0.51x | 11,146 | 7,854 | 7,089 | 7,089 | 14 | 14 | 6,598,538 | 6,562,976 | same |
+| kv_get_hot | 2000 | 280.5 | 203.2 | 0.72x | 12,000 | 8,000 | 0 | 0 | 0 | 0 | 330,740 | 138,740 | same |
+| kv_get_miss | 500 | 4,278.0 | 859.2 | 0.20x | 79,500 | 18,500 | 0 | 0 | 0 | 0 | 1,606,000 | 502,000 | same |
+| kv_delete | 192 | 5,046.9 | 1,312.1 | 0.26x | 38,571 | 10,283 | 580 | 580 | 0 | 0 | 838,162 | 300,515 | same |
+| kv_iterate | 100 | 3,700.0 | 1,345.4 | 0.36x | 15,900 | 6,900 | 0 | 0 | 0 | 0 | 321,200 | 115,400 | same |
+| kv_mount | 100 | 5,840.0 | 1,048.8 | 0.18x | 23,300 | 4,100 | 0 | 0 | 0 | 0 | 553,200 | 108,400 | same |
+| kv_large | 50 | 7,700.0 | 4,700.0 | 0.61x | 3,391 | 2,914 | 438 | 438 | 14 | 14 | 6,363,544 | 6,346,273 | same |
+| tsl_append | 308 | 45.5 | 31.0 | 0.68x | 3 | 3 | 1,260 | 1,260 | 0 | 0 | 142,452 | 142,452 | same |
+| tsl_append_rollover | 924 | 45.5 | 32.6 | 0.72x | 19 | 19 | 3,791 | 3,791 | 8 | 8 | 3,704,886 | 3,704,886 | same |
+| tsl_iter_fwd | 20 | 2,900.0 | 4,558.3 | 1.57x | 6,240 | 6,240 | 0 | 0 | 0 | 0 | 126,720 | 126,720 | same |
+| tsl_iter_rev | 20 | 2,950.0 | 5,137.5 | 1.74x | 6,240 | 6,240 | 0 | 0 | 0 | 0 | 126,720 | 126,720 | same |
+| tsl_by_time | 500 | 246.0 | 480.0 | 1.95x | 10,069 | 10,069 | 0 | 0 | 0 | 0 | 249,188 | 249,188 | same |
+| tsl_query_count | 500 | 260.0 | 452.0 | 1.74x | 10,069 | 10,069 | 0 | 0 | 0 | 0 | 249,188 | 249,188 | same |
+| tsl_mount | 50 | 160.0 | 210.8 | 1.32x | 400 | 400 | 0 | 0 | 0 | 0 | 17,600 | 17,600 | same |
+| tsl_clean | 20 | 14,550.0 | 8,793.8 | 0.60x | 160 | 160 | 25,360 | 25,360 | 80 | 80 | 35,625,440 | 35,625,440 | same |## 3. Host benchmark — write granularity 1 (bit-level NOR)
 
 | scenario | ops | ns/op C | ns/op Rust | ratio | reads C | reads Rust | writes C | writes Rust | erases C | erases Rust | weighted C | weighted Rust | checksum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| kv_set_small | 64 | 687.5 | 177.1 | 0.26x | 442 | 213 | 434 | 434 | 0 | 0 | 29,836 | 25,289 | same |
-| kv_update_1k | 1000 | 855.0 | 438.9 | 0.51x | 11,110 | 7,775 | 7,057 | 7,057 | 13 | 13 | 6,176,890 | 6,124,698 | same |
-| kv_get_hot | 2000 | 317.0 | 201.3 | 0.63x | 12,000 | 8,000 | 0 | 0 | 0 | 0 | 322,740 | 130,740 | same |
-| kv_get_miss | 500 | 5,334.0 | 932.8 | 0.17x | 79,500 | 18,500 | 0 | 0 | 0 | 0 | 1,542,000 | 428,000 | same |
+| kv_set_small | 64 | 671.9 | 205.1 | 0.31x | 442 | 213 | 434 | 434 | 0 | 0 | 29,836 | 25,289 | same |
+| kv_update_1k | 1000 | 855.0 | 439.0 | 0.51x | 11,110 | 7,775 | 7,057 | 7,057 | 13 | 13 | 6,176,890 | 6,124,698 | same |
+| kv_get_hot | 2000 | 317.0 | 201.5 | 0.64x | 12,000 | 8,000 | 0 | 0 | 0 | 0 | 322,740 | 130,740 | same |
+| kv_get_miss | 500 | 5,320.0 | 933.3 | 0.18x | 79,500 | 18,500 | 0 | 0 | 0 | 0 | 1,542,000 | 428,000 | same |
 | kv_delete | 192 | 6,036.5 | 1,253.3 | 0.21x | 38,579 | 10,132 | 579 | 579 | 0 | 0 | 807,312 | 263,047 | same |
-| kv_iterate | 100 | 4,900.0 | 1,302.5 | 0.27x | 15,900 | 6,900 | 0 | 0 | 0 | 0 | 308,400 | 100,600 | same |
-| kv_mount | 100 | 6,950.0 | 997.1 | 0.14x | 23,800 | 4,500 | 0 | 0 | 0 | 0 | 554,800 | 98,400 | same |
-| kv_large | 50 | 8,340.0 | 4,702.5 | 0.56x | 3,391 | 2,914 | 410 | 410 | 14 | 14 | 6,363,140 | 6,344,827 | same |
-| tsl_append | 336 | 53.6 | 31.2 | 0.58x | 3 | 3 | 1,372 | 1,372 | 0 | 0 | 155,296 | 155,296 | same |
-| tsl_append_rollover | 1008 | 52.6 | 32.7 | 0.62x | 19 | 19 | 4,127 | 4,127 | 8 | 8 | 3,743,298 | 3,743,298 | same |
-| tsl_iter_fwd | 20 | 3,500.0 | 4,614.6 | 1.32x | 6,800 | 6,800 | 0 | 0 | 0 | 0 | 110,080 | 110,080 | same |
-| tsl_iter_rev | 20 | 3,800.0 | 5,158.3 | 1.36x | 6,800 | 6,800 | 0 | 0 | 0 | 0 | 110,080 | 110,080 | same |
-| tsl_by_time | 500 | 282.0 | 475.2 | 1.69x | 11,336 | 11,336 | 0 | 0 | 0 | 0 | 213,248 | 213,248 | same |
-| tsl_query_count | 500 | 282.0 | 463.0 | 1.64x | 11,336 | 11,336 | 0 | 0 | 0 | 0 | 213,248 | 213,248 | same |
-| tsl_mount | 50 | 160.0 | 196.7 | 1.23x | 400 | 400 | 0 | 0 | 0 | 0 | 12,800 | 12,800 | same |
-| tsl_clean | 20 | 17,250.0 | 9,570.9 | 0.55x | 160 | 160 | 27,600 | 27,600 | 80 | 80 | 35,881,120 | 35,881,120 | same |
-## 4. Cortex-M3 firmware comparison
+| kv_iterate | 100 | 4,410.0 | 1,300.4 | 0.29x | 15,900 | 6,900 | 0 | 0 | 0 | 0 | 308,400 | 100,600 | same |
+| kv_mount | 100 | 6,930.0 | 1,006.7 | 0.15x | 23,800 | 4,100 | 0 | 0 | 0 | 0 | 554,800 | 92,000 | same |
+| kv_large | 50 | 8,320.0 | 4,705.8 | 0.57x | 3,391 | 2,914 | 410 | 410 | 14 | 14 | 6,363,140 | 6,344,827 | same |
+| tsl_append | 336 | 53.6 | 30.5 | 0.57x | 3 | 3 | 1,372 | 1,372 | 0 | 0 | 155,296 | 155,296 | same |
+| tsl_append_rollover | 1008 | 53.6 | 31.7 | 0.59x | 19 | 19 | 4,127 | 4,127 | 8 | 8 | 3,743,298 | 3,743,298 | same |
+| tsl_iter_fwd | 20 | 3,350.0 | 4,593.8 | 1.37x | 6,800 | 6,800 | 0 | 0 | 0 | 0 | 110,080 | 110,080 | same |
+| tsl_iter_rev | 20 | 3,350.0 | 5,141.7 | 1.53x | 6,800 | 6,800 | 0 | 0 | 0 | 0 | 110,080 | 110,080 | same |
+| tsl_by_time | 500 | 278.0 | 409.2 | 1.47x | 11,336 | 11,336 | 0 | 0 | 0 | 0 | 213,248 | 213,248 | same |
+| tsl_query_count | 500 | 278.0 | 390.4 | 1.40x | 11,336 | 11,336 | 0 | 0 | 0 | 0 | 213,248 | 213,248 | same |
+| tsl_mount | 50 | 160.0 | 161.7 | 1.01x | 400 | 400 | 0 | 0 | 0 | 0 | 12,800 | 12,800 | same |
+| tsl_clean | 20 | 17,850.0 | 9,585.4 | 0.54x | 160 | 160 | 27,600 | 27,600 | 80 | 80 | 35,881,120 | 35,881,120 | same |## 4. Cortex-M3 firmware comparison
 
 Both firmwares run the **same** workload under QEMU (`mps2-an385`, Cortex-M3,
 semihosting): 64 KV sets, 32 updates, 1500-update GC churn, 64 verified gets,
@@ -93,10 +91,10 @@ in both images, so it counts as neither ROM nor MCU RAM.
 
 | metric | C FlashDB (-Os) | Rust `opt-level="s"` | Rust `opt-level="z"` |
 |---|---:|---:|---:|
-| `.text` | 9 720 B | 13 904 B | 12 328 B |
+| `.text` | 9 720 B | 13 768 B | 12 276 B |
 | `.rodata` | 1 632 B | 1 448 B | 1 448 B |
 | `.data` | 56 B | 0 | 0 |
-| **ROM total** | **11 408 B** | **15 352 B** (+35%) | **13 776 B** (+21%) |
+| **ROM total** | **11 408 B** | **15 216 B** (+33%) | **13 724 B** (+20%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
 | stack high-water | 1 192 B | 1 256 B | 1 376 B |
@@ -122,10 +120,10 @@ on-flash format and behaviour identical:
 
 | configuration | ROM (`-z`) | trade-off |
 |---|---:|---|
-| default (256-byte CRC table) | 13 776 B | reference build (stable toolchain) |
-| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 12 828 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
-| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 140 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
-| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 188 B (+7%)** | smallest measured; nightly toolchain |
+| default (256-byte CRC table) | 13 724 B | reference build (stable toolchain) |
+| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 12 776 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
+| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 096 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
+| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 144 B (+6%)** | smallest measured; nightly toolchain |
 
 ### Interpretation
 
@@ -144,8 +142,8 @@ on-flash format and behaviour identical:
   exposes the per-entry dispatch cost that `fast-iter` removes (with
   `fast-iter` all scenarios are at or below C). On real flash a single index
   read costs microseconds, so a ~5 ns/entry difference is noise there.
-* **ROM: still larger than C (+21% in the `-z` size profile; +12% with
-  `small-crc`; +7% in the smallest reproducible nightly build).** Attribute analysis
+* **ROM: still larger than C (+20% in the `-z` size profile; +12% with
+  `small-crc`; +6% in the smallest reproducible nightly build).** Attribute analysis
   (`scripts/fw_rust.sh --symbols`) shows this is compiler/runtime overhead, not
   algorithm size: the linked crate is ≈7.2 KiB of symbols plus ≈1.5–2.5 KiB
   LTO-inlined into the harness, C's whole library (KVDB+TSDB+FAL+utils) is
@@ -184,7 +182,7 @@ write granularities, crash recovery, rollover and iteration boundary cases.
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 90 tests green |
 | performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
 | RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 880 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 13 776 B vs 11 408 B (`-z`); 12 828 B with `small-crc`, 12 188 B in the smallest measured nightly build (+6.8%) |
+| ROM at least C | **not achieved** — 13 724 B vs 11 408 B (`-z`); 12 776 B with `small-crc`, 12 144 B in the smallest measured nightly build (+6.5%) |
 
 ROM remains the one open objective. The residual ≈0.8 KiB is the price of the
 safe-Rust design, quantified by the attribution above: the crate's own code is

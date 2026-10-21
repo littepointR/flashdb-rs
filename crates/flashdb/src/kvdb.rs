@@ -1009,36 +1009,6 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
     }
 
-    /// One mount-time scan that computes the oldest sector address (C's
-    /// `check_oldest_addr_cb`) and whether a garbage collection was
-    /// interrupted (a sector left with dirty status GC).
-    fn inspect_sectors(&mut self) -> Result<(u32, bool), F::Error> {
-        let sec_size = self.storage.sec_size();
-        let mut oldest = 0u32;
-        let mut prev = SectorStoreStatus::Unused;
-        let mut gc_pending = false;
-        let mut addr = 0u32;
-        let mut traversed = 0u32;
-        loop {
-            traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
-            if prev == SectorStoreStatus::Empty
-                && (sec.store == SectorStoreStatus::Full || sec.store == SectorStoreStatus::Using)
-            {
-                oldest = sec.addr;
-            }
-            if sec.check_ok && sec.dirty == SectorDirtyStatus::Gc {
-                gc_pending = true;
-            }
-            prev = sec.store;
-            addr = self.next_sector_addr(&sec, traversed);
-            if addr == FAILED_ADDR {
-                break;
-            }
-        }
-        Ok((oldest, gc_pending))
-    }
-
     // -- sector formatting --------------------------------------------------
 
     fn format_sector(&mut self, addr: u32, combined: u32) -> Result<(), F::Error> {
@@ -1748,18 +1718,35 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         self.in_recovery = true;
         let total = self.storage.sector_count();
 
-        // Pass 1: count damaged sector headers (a plain ascending walk; mounts
-        // always visit every sector and the ring order only matters when
-        // combined sectors are in play, which the C writer never produces).
+        // Pass 1: count damaged sector headers and find the oldest sector with
+        // the same pre-format statuses FlashDB-C uses (`check_oldest_addr_cb`):
+        // the oldest sector is the first FULL/USING sector that follows an
+        // EMPTY one; damaged headers are UNUSED and break that chain. Mounts
+        // visit every sector, so an ascending walk is equivalent to the ring
+        // iterator here.
         let sec_size = self.storage.sec_size();
         let max_size = self.storage.max_size();
         let mut failed = 0u32;
+        let mut oldest = 0u32;
+        let mut gc_pending = false;
+        let mut prev_store = SectorStoreStatus::Unused;
         let mut addr = 0u32;
         while addr < max_size {
             let sec = self.read_sector_info(addr, false)?;
             if !sec.check_ok {
                 failed += 1;
+            } else if sec.dirty == SectorDirtyStatus::Gc {
+                // Interrupted GC, like `check_and_recovery_gc_cb`. Formatting a
+                // damaged header never changes a valid one, so detecting this
+                // on the pre-format scan is equivalent to C's post-format pass.
+                gc_pending = true;
             }
+            if prev_store == SectorStoreStatus::Empty
+                && (sec.store == SectorStoreStatus::Full || sec.store == SectorStoreStatus::Using)
+            {
+                oldest = sec.addr;
+            }
+            prev_store = sec.store;
             addr += sec_size;
         }
 
@@ -1784,7 +1771,6 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             }
         }
 
-        let (oldest, gc_pending) = self.inspect_sectors()?;
         self.storage.oldest_addr = oldest;
 
         // Resume an interrupted garbage collection, then recover records.
