@@ -36,6 +36,12 @@ small-crc = ["flashdb/small-crc"]
 # deterministic and instruction-exact.  Off by default so the documented QEMU
 # RESULT baseline stays byte-identical.
 qemu-cycles = []
+# On-silicon internal-flash endurance test: real page erase + quad-word
+# program cycles with per-cycle verification (see flash_endurance.rs).
+flash-endurance = ["board-u545"]
+# On-silicon long-run test: real KVDB + TSDB on internal flash for ~60 s of
+# operation, with per-round verification and remounts (see flash_longrun.rs).
+flash-longrun = ["board-u545"]
 
 [dependencies]
 # Real Rust rewrite under measurement (no_std, no external dependencies).

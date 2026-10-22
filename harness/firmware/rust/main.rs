@@ -21,6 +21,12 @@
 //! Build: scripts/fw_rust.sh (cargo, target thumbv7m-none-eabi).
 #![no_std]
 #![no_main]
+// The internal-flash test builds replace the standard measurement workload at
+// compile time, so the workload constants/helpers are intentionally unused there.
+#![cfg_attr(
+    any(feature = "flash-endurance", feature = "flash-longrun"),
+    allow(dead_code)
+)]
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -224,6 +230,24 @@ mod board {
         }
     }
 }
+
+/* ======================================================================== */
+/* On-silicon internal-flash endurance / long-run tests                      */
+/* (`flash-endurance` / `flash-longrun`; see realflash.rs for the driver)    */
+/* ======================================================================== */
+
+#[cfg(feature = "flash-endurance")]
+mod flash_endurance;
+#[cfg(feature = "flash-longrun")]
+mod flash_longrun;
+#[cfg(any(feature = "flash-endurance", feature = "flash-longrun"))]
+mod hwflash;
+
+#[cfg(all(feature = "flash-endurance", feature = "flash-longrun"))]
+compile_error!(
+    "features `flash-endurance` and `flash-longrun` are mutually exclusive: \
+     they are separate board runs"
+);
 
 /* ======================================================================== */
 /* Semihosting output (no libc, no core::fmt)                               */
@@ -1767,8 +1791,8 @@ fn print_result(m: &Metrics) {
     write_bytes(b" rc=0\n\0");
 }
 
-#[no_mangle]
-pub extern "C" fn main() -> ! {
+/// Standard KVDB+TSDB measurement workload (QEMU and board comparison).
+fn standard_workload() -> ! {
     let mut m = Metrics::zeroed();
     fill_section_sizes(&mut m);
     m.stack_limit = stack_limit_bytes();
@@ -1915,4 +1939,27 @@ pub extern "C" fn main() -> ! {
         write_bytes(b"\n\0");
     }
     exit()
+}
+
+/// Firmware entry point.
+///
+/// The on-silicon internal-flash tests replace the standard measurement
+/// workload at compile time: `flash-endurance` runs the endurance loop and
+/// `flash-longrun` runs the KVDB+TSDB long-run workload (both use the real
+/// STM32U5 flash controller, see `realfash`). Without either feature the
+/// standard comparison workload runs (QEMU measurement or board acceptance).
+#[no_mangle]
+pub extern "C" fn main() -> ! {
+    #[cfg(feature = "flash-endurance")]
+    {
+        flash_endurance::run()
+    }
+    #[cfg(feature = "flash-longrun")]
+    {
+        flash_longrun::run()
+    }
+    #[cfg(not(any(feature = "flash-endurance", feature = "flash-longrun")))]
+    {
+        standard_workload()
+    }
 }
