@@ -392,6 +392,11 @@ pub(crate) struct KvLayout {
     /// `KV_HDR_DATA_SIZE`: aligned size of `struct kv_hdr_data`.
     pub kv_hdr_size: u32,
     /// Raw `sizeof(struct kv_hdr_data)`.
+    ///
+    /// Kept for C `sizeof()` parity (and asserted against the aligned size in
+    /// the layout unit tests); hot paths derive their read length from the
+    /// aligned `kv_hdr_size` instead.
+    #[allow(dead_code)]
     pub kv_raw_size: u32,
     pub kv_magic_off: u32,
     pub kv_len_off: u32,

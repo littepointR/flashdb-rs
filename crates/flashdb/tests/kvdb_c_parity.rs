@@ -388,7 +388,7 @@ macro_rules! kvdb_parity_for_wg {
                 let mut db = fresh();
                 db.format().unwrap();
 
-                let mut p1 = phase(&[
+                let p1 = phase(&[
                     ("kv0", b'0', 0, true),
                     ("kv1", b'1', 0, true),
                     ("kv2", b'2', 0, true),

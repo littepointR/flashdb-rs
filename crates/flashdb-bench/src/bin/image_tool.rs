@@ -15,7 +15,7 @@
 //!   [0x4000,0x8000)  TS partition  "fdb_tsdb1" (4 x 4096-byte sectors)
 //!
 //! Deterministic workload (identical to the C tool):
-//!   KV, value helper kv_value(seed,i,len): byte[j] = (seed + i*31 + j*7) & 0xFF
+//!   KV, value helper kv_value(seed,i,len): `byte[j] = (seed + i*31 + j*7) & 0xFF`
 //!     for i in 0..7:  set("img{i}", kv_value(0x55, i, 8 << (i % 4)))
 //!                     -> lengths 8,16,32,64,8,16,32,64
 //!     for i in 0..3:  set("img{i}", kv_value(0x56, i, 16))
@@ -25,9 +25,9 @@
 //!     for i in 0..19: append(payload = ts_payload(i) 32 bytes, t = 1000 + i)
 //!
 //! Summary format (exact, identical to the C tool):
-//!   KV key=<key> len=<value_len> fnv=<fnv1a32(value) decimal>
-//!   TS time=<t> status=<int> len=<log_len> fnv=<fnv1a32(payload) decimal>
-//!   KVCOUNT=<n> TSCOUNT=<n>
+//!   `KV key=<key> len=<value_len> fnv=<fnv1a32(value) decimal>`
+//!   `TS time=<t> status=<int> len=<log_len> fnv=<fnv1a32(payload) decimal>`
+//!   `KVCOUNT=<n> TSCOUNT=<n>`
 //! On mount/check failure it prints `ERROR=<code>` (numeric FlashDB
 //! `fdb_err_t`, 255 = I/O) and exits 2.
 

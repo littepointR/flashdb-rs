@@ -161,7 +161,7 @@ pub struct TslEntry<T: Timestamp = i32> {
     pub log_len: u32,
     /// Address of the index record (used to change the status).
     pub index_addr: u32,
-    /// Address of the payload (or [`FAILED_ADDR`] when not available).
+    /// Address of the payload (or `0xFFFF_FFFF` when not available).
     pub log_addr: u32,
 }
 
@@ -203,7 +203,7 @@ impl<T: Timestamp> Default for SecInfo<T> {
 /// alias for the 32-bit FlashDB default or [`Tsdb64`] for the
 /// `FDB_USING_TIMESTAMP_64BIT` format.
 ///
-/// See the [module documentation](self) for usage.
+/// See the [crate documentation](crate) for usage.
 pub struct TsdbImpl<F: Flash, T: Timestamp> {
     storage: Storage<F>,
     cur_sec: SecInfo<T>,

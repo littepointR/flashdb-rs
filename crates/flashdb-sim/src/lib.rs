@@ -20,6 +20,7 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use core::fmt;
 use flashdb::Flash;
@@ -54,11 +55,17 @@ impl std::error::Error for SimError {}
 /// Flash operation counters.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
+    /// Number of read operations.
     pub read_ops: u64,
+    /// Total bytes read.
     pub read_bytes: u64,
+    /// Number of write operations.
     pub write_ops: u64,
+    /// Total bytes written (including no-op writes).
     pub write_bytes: u64,
+    /// Number of erase operations.
     pub erase_ops: u64,
+    /// Total bytes erased.
     pub erase_bytes: u64,
     /// Writes whose bytes were already identical (FlashDB writes erased
     /// padding bytes in some places; counted for transparency).
@@ -72,6 +79,7 @@ impl Stats {
         self.read_bytes + self.write_bytes * 10 + self.erase_bytes * 100
     }
 
+    /// Reset all counters to zero.
     pub fn reset(&mut self) {
         *self = Stats::default();
     }
@@ -121,18 +129,22 @@ impl<const SIZE: usize, const WG: u32> RamFlash<SIZE, WG> {
         self.strict_write = strict;
     }
 
+    /// Snapshot of the operation counters.
     pub fn stats(&self) -> Stats {
         self.stats
     }
 
+    /// Reset the operation counters (keeps the flash contents intact).
     pub fn reset_stats(&mut self) {
         self.stats.reset();
     }
 
+    /// Raw contents of the simulated flash region.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
+    /// Erase-block size in bytes, as configured in [`RamFlash::new`].
     pub fn erase_size(&self) -> u32 {
         self.erase_size
     }
@@ -159,10 +171,12 @@ impl<const SIZE: usize, const WG: u32> RamFlash<SIZE, WG> {
         self.fault_writes_only = true;
     }
 
+    /// Disarm fault injection (the next operations succeed again).
     pub fn disarm_fault(&mut self) {
         self.fail_at_op = None;
     }
 
+    /// Number of flash operations performed since reset.
     pub fn op_index(&self) -> u64 {
         self.op_index
     }
@@ -258,10 +272,12 @@ pub mod image {
     use std::io;
     use std::path::Path;
 
+    /// Write a captured flash image to a file.
     pub fn save(path: impl AsRef<Path>, data: &[u8]) -> io::Result<()> {
         fs::write(path, data)
     }
 
+    /// Read a flash image back from a file.
     pub fn load(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         fs::read(path)
     }
