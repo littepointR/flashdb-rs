@@ -49,6 +49,15 @@ const TS_BASE_TIME: u32 = 1000;
 /// upper-bound validation in the Rust API, the on-flash format is identical).
 const TS_MAX_LEN: u32 = 32;
 
+/// Real-board rollover phase (`board-u545`), and the same workload under
+/// QEMU (`qemu-cycles`, so its cost can be measured without silicon): append
+/// past the ring capacity of the 16 KiB / 4-sector partition (~448 entries of
+/// 16-byte payload), then verify the live window and the remount recovery.
+/// Kept out of the default QEMU image so the documented baseline stays
+/// unchanged.
+#[cfg(any(feature = "board-u545", feature = "qemu-cycles"))]
+const TS_ROLL_APPENDS: u32 = 1200;
+
 const SECTOR_SIZE: u32 = 4096;
 const KV_PARTITION_SIZE: u32 = 16 * 1024;
 const TS_PARTITION_SIZE: u32 = 16 * 1024;
@@ -110,9 +119,30 @@ mod board {
         buf: [0; 4096],
     };
 
+    /// Clear the result buffer before the first write.
+    ///
+    /// `.results` is a `NOLOAD` section (see board.ld) so the image carries no
+    /// load data for it and the boot code neither copies nor zeroes it: the
+    /// static initializer above is discarded and SRAM contents after reset are
+    /// undefined. The host reads `done`/`len`, so both must be reset here.
+    pub fn reset_output() {
+        unsafe {
+            let out = &raw mut BOARD_OUT;
+            (*out).done = 0;
+            (*out).len = 0;
+        }
+    }
+
     /// Semihosting replacement used by the board build: SYS_WRITE0 appends the
     /// NUL-terminated string to the RAM buffer, SYS_EXIT marks it complete and
     /// spins so the probe can halt and read it.
+    ///
+    /// Deliberately *not* inlined: the append loop is ~60 B and every
+    /// `write_bytes()` call site would otherwise carry its own copy.  With
+    /// `#[inline(always)]` on the wrapper below, LTO used to duplicate the
+    /// loop into `main` + `print_result` (+~800 B of ROM on the board image
+    /// versus the QEMU build, which uses the 3-instruction `bkpt` path).
+    #[inline(never)]
     pub fn semihost(op: u32, arg: usize) -> u32 {
         unsafe {
             let out = &raw mut BOARD_OUT;
@@ -159,6 +189,39 @@ mod board {
     #[inline(always)]
     pub fn cycles() -> u32 {
         unsafe { core::ptr::read_volatile(DWT_CYCCNT) }
+    }
+
+    // RCC (STM32U5 family, base 0x4602_0C00) -- read-only decode of the system
+    // clock, so the `core_hz` reported to the host cannot drift from silicon.
+    // This measurement firmware never reconfigures the clock tree, so SYSCLK is
+    // the reset clock: MSIS with range index 4, which is 4 MHz on this board
+    // (the same value CubeMX reports for the NUCLEO-U545RE-Q default clock tree;
+    // confirmed against the measured run time on silicon). Any other state is
+    // reported as 0 = unknown so the host prints raw cycles instead of a wrong
+    // microsecond conversion.
+    const RCC_ICSCR1: *const u32 = 0x4602_0C08 as *const u32;
+    const RCC_CFGR1: *const u32 = 0x4602_0C1C as *const u32;
+    const RCC_CSR: *const u32 = 0x4602_0CF4 as *const u32;
+
+    pub fn core_hz() -> u32 {
+        unsafe {
+            let cfgr1 = core::ptr::read_volatile(RCC_CFGR1);
+            let icscr1 = core::ptr::read_volatile(RCC_ICSCR1);
+            let csr = core::ptr::read_volatile(RCC_CSR);
+            let sw = cfgr1 & 0b11; // 0 = MSIS
+            let msis_range = if icscr1 & (1 << 23) != 0 {
+                // MSIRGSEL = 1: range in RCC_ICSCR1.MSISRANGE
+                (icscr1 >> 28) & 0xF
+            } else {
+                // MSIRGSEL = 0 (reset state): range in RCC_CSR.MSISSRANGE
+                (csr >> 12) & 0xF
+            };
+            if sw == 0 && msis_range == 4 {
+                4_000_000
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -234,6 +297,196 @@ fn exit() -> ! {
     loop {}
 }
 
+/* ======================================================================== */
+/* QEMU cycle/instruction proxy (`qemu-cycles` feature, QEMU builds only)   */
+/*                                                                          */
+/* What QEMU 8.2 actually models on mps2-an385 (Cortex-M3), measured with    */
+/* the probe below:                                                         */
+/*   * semihosting SYS_TICKFREQ (0x31) works and reports 1 GHz;             */
+/*   * semihosting SYS_ELAPSED (0x30) returns 0 in every argument form, so   */
+/*     it is NOT usable as a time source;                                   */
+/*   * the DWT cycle counter is not modelled (DWT_CTRL reads 0, CYCCNT      */
+/*     never advances);                                                     */
+/*   * SysTick IS modelled and runs off QEMU's virtual clock.  Under         */
+/*     `qemu-system-arm -icount shift=0` one instruction consumes exactly    */
+/*     one virtual nanosecond, so a SysTick tick is a fixed, deterministic   */
+/*     number of instructions (MPS2-AN385 SysTick = 25 MHz -> 1 tick = 40    */
+/*     ns = 40 instructions).  That makes the phase boundaries measurable    */
+/*     without silicon, including the board rollover workload, and repeated  */
+/*     runs are bit-identical.                                               */
+/*                                                                          */
+/* The counter is used free-running (24-bit down-counter, no interrupt), so  */
+/* it costs no stack and cannot perturb the workload's own stack baseline.   */
+/* A phase must stay below 2^24 ticks (~670 M instructions) for its delta to */
+/* be unambiguous; each reported value is a separate phase delta, and the    */
+/* total is their sum.  Read tick deltas as `delta(earlier, later)`.         */
+/* ======================================================================== */
+
+#[cfg(all(feature = "qemu-cycles", feature = "board-u545"))]
+compile_error!(
+    "features `qemu-cycles` and `board-u545` are mutually exclusive: the board \
+     image reports DWT cycles, the QEMU proxy reports SysTick virtual ticks"
+);
+
+#[cfg(feature = "qemu-cycles")]
+mod qcycles {
+    use super::{write_bytes, write_hex32, write_u32};
+
+    /// ARM semihosting SYS_ELAPSED / SYS_TICKFREQ (probed, not used for timing:
+    /// QEMU 8.2 returns 0 from SYS_ELAPSED).
+    const SYS_ELAPSED: u32 = 0x30;
+    const SYS_TICKFREQ: u32 = 0x31;
+
+    /// Cortex-M3 DWT registers (probed; not modelled by QEMU).
+    const DWT_CTRL: *const u32 = 0xE000_1000 as *const u32;
+    const DWT_CYCCNT: *const u32 = 0xE000_1004 as *const u32;
+
+    /// SysTick (NVIC) registers: CTRL / LOAD / VAL.
+    const SYST_CTRL: *mut u32 = 0xE000_E010 as *mut u32;
+    const SYST_LOAD: *mut u32 = 0xE000_E014 as *mut u32;
+    const SYST_VAL: *mut u32 = 0xE000_E018 as *mut u32;
+    /// CTRL: ENABLE | CLKSOURCE=processor clock, no TICKINT (no exceptions).
+    const SYST_CTRL_FREE_RUNNING: u32 = 0x5;
+
+    pub const TICK_MASK: u32 = 0x00FF_FFFF;
+
+    /// Instructions retired by one `spin()` call (2-instruction asm loop, 10000
+    /// iterations: both instructions execute on every iteration, including the
+    /// last one where the conditional branch falls through).
+    pub const SPIN_INSTRUCTIONS: u32 = 20_000;
+
+    /// Busy-loop sink so the probe delta cannot be optimised away.
+    static mut PROBE_SINK: u32 = 0;
+    /// SysTick ticks measured for exactly `SPIN_INSTRUCTIONS` instructions;
+    /// printed so the host can convert ticks to an instruction estimate
+    /// (instructions = ticks * SPIN_INSTRUCTIONS / spin_ticks).
+    static mut PROBE_SPIN_TICKS: u32 = 0;
+
+    /// Semihosting call returning both R0 and R1 (probe only).
+    #[inline(always)]
+    fn semihost2(op: u32, arg: u32) -> (u32, u32) {
+        let mut r0 = op;
+        let mut r1 = arg;
+        unsafe {
+            core::arch::asm!(
+                "bkpt 0xab",
+                inout("r0") r0,
+                inout("r1") r1,
+                options(nostack, preserves_flags)
+            );
+        }
+        (r0, r1)
+    }
+
+    /// Exactly `SPIN_INSTRUCTIONS` retired instructions (2 per iteration plus
+    /// the final conditional branch), used to calibrate ticks -> instructions.
+    #[inline(never)]
+    fn spin() {
+        let mut n: u32 = 10_000;
+        unsafe {
+            core::arch::asm!(
+                "1:",
+                "subs {n}, {n}, #1",
+                "bne 1b",
+                n = inout(reg) n => _,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// Start the free-running SysTick 24-bit down-counter.
+    #[inline(always)]
+    pub fn init() {
+        unsafe {
+            core::ptr::write_volatile(SYST_LOAD, TICK_MASK);
+            core::ptr::write_volatile(SYST_VAL, 0);
+            core::ptr::write_volatile(SYST_CTRL, SYST_CTRL_FREE_RUNNING);
+        }
+    }
+
+    /// Current SysTick value (counts down).
+    #[inline(always)]
+    pub fn now() -> u32 {
+        unsafe { core::ptr::read_volatile(SYST_VAL) }
+    }
+
+    /// Ticks elapsed between two `now()` samples (handles one wrap).
+    #[inline(always)]
+    pub fn delta(earlier: u32, later: u32) -> u32 {
+        earlier.wrapping_sub(later) & TICK_MASK
+    }
+
+    /// Ticks measured for `SPIN_INSTRUCTIONS` instructions (calibration).
+    pub fn spin_ticks() -> u32 {
+        unsafe { PROBE_SPIN_TICKS }
+    }
+
+    /// Print one `QEMU_PROBE` line with the raw evidence for which time source
+    /// the emulator supports (and the tick calibration).  Called once, before
+    /// `init()` and before the first measured phase.
+    #[inline(never)]
+    pub fn probe() {
+        let (freq_lo, freq_hi) = semihost2(SYS_TICKFREQ, 0);
+        let (e32_a, _) = semihost2(SYS_ELAPSED, 0);
+        let (e64a_lo, e64a_hi) = semihost2(SYS_ELAPSED, 1);
+        let (e_bad, _) = semihost2(SYS_ELAPSED, 2);
+        let dwt_ctrl = unsafe { core::ptr::read_volatile(DWT_CTRL) };
+        let cyc_a = unsafe { core::ptr::read_volatile(DWT_CYCCNT) };
+
+        // Free-running SysTick, then time a known-instruction-count spin.
+        init();
+        let spin_a = now();
+        spin();
+        let spin_b = now();
+        let spin_delta = delta(spin_a, spin_b);
+        unsafe { PROBE_SPIN_TICKS = spin_delta };
+
+        // Kept so the probe is not optimised into nothing; also gives a second
+        // non-zero delta sample for the volatile-store loop.
+        let mut x = 0u32;
+        let mut i = 0u32;
+        while i < 100 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) ^ i;
+            unsafe { core::ptr::write_volatile(&raw mut PROBE_SINK, x) };
+            i += 1;
+        }
+
+        let (e32_b, _) = semihost2(SYS_ELAPSED, 0);
+        let (e64b_lo, e64b_hi) = semihost2(SYS_ELAPSED, 1);
+        let cyc_b = unsafe { core::ptr::read_volatile(DWT_CYCCNT) };
+
+        write_bytes(b"QEMU_PROBE tickfreq=\0");
+        write_hex32(freq_lo);
+        write_bytes(b" tickfreq_hi=\0");
+        write_hex32(freq_hi);
+        write_bytes(b" e32_a=\0");
+        write_hex32(e32_a);
+        write_bytes(b" e32_b=\0");
+        write_hex32(e32_b);
+        write_bytes(b" e64a_lo=\0");
+        write_hex32(e64a_lo);
+        write_bytes(b" e64b_lo=\0");
+        write_hex32(e64b_lo);
+        write_bytes(b" e64_hi_a=\0");
+        write_hex32(e64a_hi);
+        write_bytes(b" e64_hi_b=\0");
+        write_hex32(e64b_hi);
+        write_bytes(b" e_arg2=\0");
+        write_hex32(e_bad);
+        write_bytes(b" dwt_ctrl=\0");
+        write_hex32(dwt_ctrl);
+        write_bytes(b" dwt_cyc_delta=\0");
+        write_hex32(cyc_b.wrapping_sub(cyc_a));
+        write_bytes(b" spin_insn=\0");
+        write_u32(SPIN_INSTRUCTIONS);
+        write_bytes(b" spin_ticks=\0");
+        write_u32(spin_delta);
+        write_bytes(b" syst_mask=\0");
+        write_hex32(TICK_MASK);
+        write_bytes(b"\n\0");
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn fail(stage: &[u8], code: u32) -> ! {
@@ -257,6 +510,8 @@ const TAG_KV_MOUNT: &[u8] = b"kv_mount\0";
 const TAG_TS_MOUNT: &[u8] = b"ts_mount\0";
 const TAG_KV: &[u8] = b"kv\0";
 const TAG_TS: &[u8] = b"ts\0";
+#[cfg(any(feature = "board-u545", feature = "qemu-cycles"))]
+const TAG_TS_ROLL: &[u8] = b"ts_roll\0";
 
 /// Unwrap a database operation, exiting through `fail()` on error.
 #[inline(always)]
@@ -502,7 +757,7 @@ struct Metrics {
     bss: u32,
     sim_flash: u32,
     stack: u32,
-    stack_init: u32,   /* mount/init phase (paint is fresh before main) */
+    stack_init: u32, /* mount/init phase (paint is fresh before main) */
     stack_limit: u32,
     kv_writes: u32,
     kv_gets: u32,
@@ -526,6 +781,36 @@ struct Metrics {
     st_ts_append: u32,
     #[cfg(feature = "stack-phases")]
     st_ts_iter: u32,
+    /// Real-board rollover phase results (`board-u545` only; zero otherwise).
+    /// Appended after the diagnostic block so `print_result`'s table walk over
+    /// the leading fields is unaffected.
+    #[cfg(feature = "board-u545")]
+    ts_roll_appends: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_erases: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_violations: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_count: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_first_time: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_last_time: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_checksum: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_remount_count: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_remount_checksum: u32,
+    #[cfg(feature = "board-u545")]
+    ts_roll_continue_ok: u32,
+    /// FNV-1a over the raw KV / TS partition images after the whole workload
+    /// (board only): proves that both implementations leave byte-identical
+    /// flash images, not just identical logical results.
+    #[cfg(feature = "board-u545")]
+    kv_image_checksum: u32,
+    #[cfg(feature = "board-u545")]
+    ts_image_checksum: u32,
 }
 
 impl Metrics {
@@ -559,6 +844,30 @@ impl Metrics {
             st_ts_append: 0,
             #[cfg(feature = "stack-phases")]
             st_ts_iter: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_appends: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_erases: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_violations: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_count: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_first_time: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_last_time: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_checksum: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_remount_count: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_remount_checksum: 0,
+            #[cfg(feature = "board-u545")]
+            ts_roll_continue_ok: 0,
+            #[cfg(feature = "board-u545")]
+            kv_image_checksum: 0,
+            #[cfg(feature = "board-u545")]
+            ts_image_checksum: 0,
         }
     }
 }
@@ -643,6 +952,13 @@ static mut KV_SIM_FLASH: SimFlashStore<{ KV_PARTITION_SIZE as usize }> =
 static mut TS_SIM_FLASH: SimFlashStore<{ TS_PARTITION_SIZE as usize }> =
     SimFlashStore([0u8; TS_PARTITION_SIZE as usize]);
 
+#[cfg(feature = "board-u545")]
+static mut SIM_SET_BIT_ATTEMPTS: u32 = 0;
+#[cfg(feature = "board-u545")]
+static mut SIM_ERASES: u32 = 0;
+#[cfg(feature = "board-u545")]
+static mut SIM_OOB: u32 = 0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimFlashError {
     OutOfBounds,
@@ -672,8 +988,21 @@ impl SimFlash {
 
     fn check(&self, addr: u32, len: usize) -> Result<usize, SimFlashError> {
         let start = addr as usize;
-        let end = start.checked_add(len).ok_or(SimFlashError::OutOfBounds)?;
+        let end = match start.checked_add(len) {
+            Some(end) => end,
+            None => {
+                #[cfg(feature = "board-u545")]
+                unsafe {
+                    SIM_OOB = SIM_OOB.wrapping_add(1);
+                }
+                return Err(SimFlashError::OutOfBounds);
+            }
+        };
         if end > self.len {
+            #[cfg(feature = "board-u545")]
+            unsafe {
+                SIM_OOB = SIM_OOB.wrapping_add(1);
+            }
             return Err(SimFlashError::OutOfBounds);
         }
         Ok(start)
@@ -710,7 +1039,13 @@ impl Flash for SimFlash {
             unsafe {
                 // NOR programming can only clear bits (1 -> 0).
                 let old = core::ptr::read_volatile(self.base.add(start + i));
-                core::ptr::write_volatile(self.base.add(start + i), old & buf[i]);
+                let new = old & buf[i];
+                #[cfg(feature = "board-u545")]
+                if new != buf[i] {
+                    // A bit that is 0 in flash was asked to become 1.
+                    SIM_SET_BIT_ATTEMPTS = SIM_SET_BIT_ATTEMPTS.wrapping_add(1);
+                }
+                core::ptr::write_volatile(self.base.add(start + i), new);
             }
             i += 1;
         }
@@ -723,11 +1058,51 @@ impl Flash for SimFlash {
             return Err(SimFlashError::UnalignedErase);
         }
         let start = self.check(addr, len as usize)?;
+        #[cfg(feature = "board-u545")]
+        unsafe {
+            SIM_ERASES = SIM_ERASES.wrapping_add(1);
+        }
         unsafe {
             core::ptr::write_bytes(self.base.add(start), 0xFF, len as usize);
         }
         Ok(())
     }
+}
+
+/// Reset/read the NOR simulation counters (board rollover phase).
+#[cfg(feature = "board-u545")]
+fn sim_reset_stats() {
+    unsafe {
+        SIM_SET_BIT_ATTEMPTS = 0;
+        SIM_ERASES = 0;
+        SIM_OOB = 0;
+    }
+}
+
+#[cfg(feature = "board-u545")]
+fn sim_violations() -> u32 {
+    unsafe { SIM_SET_BIT_ATTEMPTS.wrapping_add(SIM_OOB) }
+}
+
+#[cfg(feature = "board-u545")]
+fn sim_erases() -> u32 {
+    unsafe { SIM_ERASES }
+}
+
+/// FNV-1a over a whole simulated partition: the on-flash image fingerprint used
+/// to prove C/Rust write-identical images on silicon.
+#[cfg(feature = "board-u545")]
+#[inline(never)]
+fn image_checksum(flash: SimFlash) -> u32 {
+    let mut h = 0u32;
+    let mut i = 0usize;
+    while i < flash.len {
+        let b = unsafe { core::ptr::read_volatile(flash.base.add(i)) };
+        h ^= b as u32;
+        h = h.wrapping_mul(16_777_619);
+        i += 1;
+    }
+    h
 }
 
 fn kv_flash() -> SimFlash {
@@ -966,7 +1341,8 @@ fn kv_phase(m: &mut Metrics) {
         let entry = ok_or_fail(entry, TAG_KV);
         m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, entry.name());
         let got = ok_or_fail(it.read_value(&entry, &mut iter_buf), TAG_KV);
-        let got_slice = unsafe { core::slice::from_raw_parts(iter_buf.as_ptr(), got.min(iter_buf.len())) };
+        let got_slice =
+            unsafe { core::slice::from_raw_parts(iter_buf.as_ptr(), got.min(iter_buf.len())) };
         m.kv_iter_checksum = fnv1a(m.kv_iter_checksum, got_slice);
         m.kv_iterated += 1;
     }
@@ -1018,6 +1394,199 @@ fn tsdb_phase(m: &mut Metrics) {
     if n != TS_APPENDS {
         fail(TAG_TS, n);
     }
+}
+
+/* ======================================================================== */
+/* Rollover phase: board (`board-u545`) and QEMU proxy (`qemu-cycles`)      */
+/* ======================================================================== */
+
+/// One rollover-phase run: the board reports every field in RESULT (so the C
+/// reference has to reproduce them field by field); the QEMU cycle proxy runs
+/// the identical workload purely to time it (its fields are printed on the
+/// QEMU_CYCLES line, not in RESULT).
+#[cfg(any(feature = "board-u545", feature = "qemu-cycles"))]
+struct RolloverResult {
+    appends: u32,
+    erases: u32,
+    violations: u32,
+    count: u32,
+    first_time: i32,
+    last_time: i32,
+    checksum: u32,
+    remount_count: u32,
+    remount_checksum: u32,
+    continue_ok: u32,
+}
+
+/// Fill the TSDB ring past its capacity, verify the live window, then recover
+/// it from flash.  This is the on-silicon counterpart of the host-side
+/// `tsdb_rollover` tests: the same invariants (contiguous live window, payload
+/// integrity, ring still accepting appends after remount, no illegal NOR
+/// programming).  The board simulation counters only exist in the
+/// `board-u545` image, so those two invariants are checked there.
+#[cfg(any(feature = "board-u545", feature = "qemu-cycles"))]
+#[inline(never)]
+fn ts_rollover_workload() -> RolloverResult {
+    #[cfg(feature = "board-u545")]
+    sim_reset_stats();
+    ts().set_rollover(true);
+
+    let mut payload = [0u8; TS_PAYLOAD_LEN];
+    let mut i = 0u32;
+    while i < TS_ROLL_APPENDS {
+        let idx = TS_APPENDS + i;
+        make_ts_payload(&mut payload, idx);
+        ok_or_fail(
+            ts().append((TS_BASE_TIME + idx) as i32, &payload),
+            TAG_TS_ROLL,
+        );
+        i += 1;
+    }
+
+    let (count, first, last, checksum) = ts_roll_scan();
+    if count == 0 {
+        fail(TAG_TS_ROLL, 1);
+    }
+    if first + count as i32 - 1 != last {
+        fail(TAG_TS_ROLL, 2);
+    }
+
+    // Remount from flash: the ring state must come back identically (mirrors
+    // the C `fdb_tsdb_deinit` + `fdb_tsdb_init` recovery below).
+    let slot = unsafe { &mut *TS_DB.0.get() };
+    ok_or_fail(
+        Tsdb::mount_into(
+            slot,
+            ts_flash(),
+            Config::new(SECTOR_SIZE, TS_PARTITION_SIZE),
+            TS_MAX_LEN,
+        ),
+        TAG_TS_ROLL,
+    );
+    let (count2, first2, last2, checksum2) = ts_roll_scan();
+    if count2 != count || first2 != first || last2 != last || checksum2 != checksum {
+        fail(TAG_TS_ROLL, 3);
+    }
+
+    // The ring must keep accepting appends after recovery.
+    let idx = TS_APPENDS + TS_ROLL_APPENDS;
+    make_ts_payload(&mut payload, idx);
+    ok_or_fail(
+        ts().append((TS_BASE_TIME + idx) as i32, &payload),
+        TAG_TS_ROLL,
+    );
+    if ts().last_time() != (TS_BASE_TIME + idx) as i32 {
+        fail(TAG_TS_ROLL, 4);
+    }
+
+    let mut result = RolloverResult {
+        appends: TS_ROLL_APPENDS,
+        erases: 0,
+        violations: 0,
+        count,
+        first_time: first,
+        last_time: last,
+        checksum,
+        remount_count: count2,
+        remount_checksum: checksum2,
+        continue_ok: 1,
+    };
+
+    #[cfg(feature = "board-u545")]
+    {
+        result.erases = sim_erases();
+        result.violations = sim_violations();
+        if result.erases == 0 {
+            fail(TAG_TS_ROLL, 5);
+        }
+        if result.violations != 0 {
+            fail(TAG_TS_ROLL, 6);
+        }
+    }
+
+    result
+}
+
+/// Board wrapper: run the rollover workload and publish its fields in RESULT.
+#[cfg(feature = "board-u545")]
+#[inline(never)]
+fn ts_rollover_phase(m: &mut Metrics) {
+    let r = ts_rollover_workload();
+    m.ts_roll_appends = r.appends;
+    m.ts_roll_erases = r.erases;
+    m.ts_roll_violations = r.violations;
+    m.ts_roll_count = r.count;
+    m.ts_roll_first_time = r.first_time as u32;
+    m.ts_roll_last_time = r.last_time as u32;
+    m.ts_roll_checksum = r.checksum;
+    m.ts_roll_remount_count = r.remount_count;
+    m.ts_roll_remount_checksum = r.remount_checksum;
+    m.ts_roll_continue_ok = r.continue_ok;
+}
+
+/// Iterate the TSDB live window: verify contiguous increasing timestamps and
+/// the expected payload of every entry, and checksum the payloads.
+#[cfg(any(feature = "board-u545", feature = "qemu-cycles"))]
+#[inline(never)]
+fn ts_roll_scan() -> (u32, i32, i32, u32) {
+    let mut it = ts().iter();
+    let mut payload = [0u8; TS_PAYLOAD_LEN];
+    let mut expected = [0u8; TS_PAYLOAD_LEN];
+    let mut count = 0u32;
+    let mut first = 0i32;
+    let mut last = 0i32;
+    let mut checksum = 0u32;
+    while let Some(entry) = it.next() {
+        let entry = ok_or_fail(entry, TAG_TS_ROLL);
+        if count > 0 && entry.time != last + 1 {
+            fail(TAG_TS_ROLL, 7);
+        }
+        let got = ok_or_fail(it.read_blob(&entry, &mut payload), TAG_TS_ROLL);
+        if got != TS_PAYLOAD_LEN {
+            fail(TAG_TS_ROLL, 8);
+        }
+        make_ts_payload(&mut expected, (entry.time - TS_BASE_TIME as i32) as u32);
+        if payload != expected {
+            fail(TAG_TS_ROLL, 9);
+        }
+        checksum = fnv1a(checksum, &payload);
+        if count == 0 {
+            first = entry.time;
+        }
+        last = entry.time;
+        count += 1;
+    }
+    (count, first, last, checksum)
+}
+
+#[cfg(feature = "board-u545")]
+#[inline(never)]
+fn print_rollover_result(m: &Metrics) {
+    write_bytes(b"RESULT ts_roll_appends=\0");
+    write_u32(m.ts_roll_appends);
+    write_bytes(b" ts_roll_erases=\0");
+    write_u32(m.ts_roll_erases);
+    write_bytes(b" ts_roll_violations=\0");
+    write_u32(m.ts_roll_violations);
+    write_bytes(b" ts_roll_count=\0");
+    write_u32(m.ts_roll_count);
+    write_bytes(b" ts_roll_first_time=\0");
+    write_u32(m.ts_roll_first_time);
+    write_bytes(b" ts_roll_last_time=\0");
+    write_u32(m.ts_roll_last_time);
+    write_bytes(b" ts_roll_checksum=\0");
+    write_hex32(m.ts_roll_checksum);
+    write_bytes(b" ts_roll_remount_count=\0");
+    write_u32(m.ts_roll_remount_count);
+    write_bytes(b" ts_roll_remount_checksum=\0");
+    write_hex32(m.ts_roll_remount_checksum);
+    write_bytes(b" ts_roll_continue_ok=\0");
+    write_u32(m.ts_roll_continue_ok);
+    write_bytes(b" kv_image_checksum=\0");
+    write_hex32(m.kv_image_checksum);
+    write_bytes(b" ts_image_checksum=\0");
+    write_hex32(m.ts_image_checksum);
+    write_bytes(b"\n\0");
 }
 
 /* ======================================================================== */
@@ -1091,19 +1660,25 @@ fn stack_diagnostics(m: &mut Metrics) {
     }
     m.st_gc = stack_high_water_bytes();
 
-    // (f) one TSDB append, (g) full TSDB iteration.  The TS database has all
-    //     200 records from the workload at this point; the diagnostic append
-    //     uses the next timestamp so the iteration then sees 201 entries.
+    // (f) one TSDB append, (g) full TSDB iteration.  The diagnostic append
+    //     uses the next timestamp after whatever is already in the ring:
+    //     on QEMU that is TS_BASE_TIME + TS_APPENDS (200 workload appends, a
+    //     compile-time constant so the QEMU image stays byte-identical), but on
+    //     the board the rollover phase has filled the ring to
+    //     TS_BASE_TIME + TS_APPENDS + TS_ROLL_APPENDS first, so a hard-coded
+    //     timestamp would be rejected (time <= last_time).
     let tsdb = ts();
     let mut ts_payload = [0u8; TS_PAYLOAD_LEN];
     let mut ts_buf = [0u8; TS_PAYLOAD_LEN];
 
+    let next_time: i32 = if cfg!(feature = "board-u545") {
+        tsdb.last_time() + 1
+    } else {
+        (TS_BASE_TIME + TS_APPENDS) as i32
+    };
     stack_repaint();
-    make_ts_payload(&mut ts_payload, TS_APPENDS);
-    if tsdb
-        .append((TS_BASE_TIME + TS_APPENDS) as i32, &ts_payload)
-        .is_err()
-    {
+    make_ts_payload(&mut ts_payload, (next_time - TS_BASE_TIME as i32) as u32);
+    if tsdb.append(next_time, &ts_payload).is_err() {
         fail(b"st_ts_append\0", 0);
     }
     m.st_ts_append = stack_high_water_bytes();
@@ -1125,7 +1700,15 @@ fn stack_diagnostics(m: &mut Metrics) {
         }
         ts_n += 1;
     }
+    // QEMU (no rollover) has a fixed live window: the 200 workload records plus
+    // this diagnostic append.  The board rollover phase leaves a sliding window
+    // whose length depends on the ring capacity, so only sanity-check it there.
+    #[cfg(not(feature = "board-u545"))]
     if ts_n != TS_APPENDS + 1 {
+        fail(b"st_ts_iter_count\0", ts_n);
+    }
+    #[cfg(feature = "board-u545")]
+    if ts_n == 0 {
         fail(b"st_ts_iter_count\0", ts_n);
     }
     m.st_ts_iter = stack_high_water_bytes();
@@ -1190,6 +1773,17 @@ pub extern "C" fn main() -> ! {
     fill_section_sizes(&mut m);
     m.stack_limit = stack_limit_bytes();
 
+    // QEMU cycle/instruction proxy: probe the time sources, start the
+    // free-running SysTick, then take the phase-timing baseline (mod qcycles).
+    #[cfg(feature = "qemu-cycles")]
+    qcycles::probe();
+    #[cfg(feature = "qemu-cycles")]
+    qcycles::init();
+    #[cfg(feature = "qemu-cycles")]
+    let q_start = qcycles::now();
+
+    #[cfg(feature = "board-u545")]
+    board::reset_output();
     #[cfg(feature = "board-u545")]
     board::init_cycles();
     #[cfg(feature = "board-u545")]
@@ -1201,6 +1795,10 @@ pub extern "C" fn main() -> ! {
 
     #[cfg(feature = "board-u545")]
     let cycles_mount = board::cycles().wrapping_sub(t0);
+    #[cfg(feature = "qemu-cycles")]
+    let q_after_mount = qcycles::now();
+    #[cfg(feature = "qemu-cycles")]
+    let q_mount = qcycles::delta(q_start, q_after_mount);
     #[cfg(feature = "board-u545")]
     let t_kv = board::cycles();
 
@@ -1211,6 +1809,10 @@ pub extern "C" fn main() -> ! {
 
     #[cfg(feature = "board-u545")]
     let cycles_kv = board::cycles().wrapping_sub(t_kv);
+    #[cfg(feature = "qemu-cycles")]
+    let q_after_kv = qcycles::now();
+    #[cfg(feature = "qemu-cycles")]
+    let q_kv = qcycles::delta(q_after_mount, q_after_kv);
     #[cfg(feature = "board-u545")]
     let t_ts = board::cycles();
 
@@ -1218,6 +1820,26 @@ pub extern "C" fn main() -> ! {
 
     #[cfg(feature = "board-u545")]
     let cycles_ts = board::cycles().wrapping_sub(t_ts);
+    #[cfg(feature = "qemu-cycles")]
+    let q_after_ts = qcycles::now();
+    #[cfg(feature = "qemu-cycles")]
+    let q_ts = qcycles::delta(q_after_kv, q_after_ts);
+
+    // Rollover phase (ring fill + wrap + recovery), measured as its own phase
+    // and included in the final stack scan and total.  On the board it feeds the
+    // RESULT fields; under the QEMU proxy it exists only to be timed.
+    #[cfg(feature = "board-u545")]
+    let t_roll = board::cycles();
+    #[cfg(feature = "qemu-cycles")]
+    let q_roll_start = qcycles::now();
+    #[cfg(feature = "board-u545")]
+    ts_rollover_phase(&mut m);
+    #[cfg(feature = "qemu-cycles")]
+    let q_roll_result = ts_rollover_workload();
+    #[cfg(feature = "board-u545")]
+    let cycles_roll = board::cycles().wrapping_sub(t_roll);
+    #[cfg(feature = "qemu-cycles")]
+    let q_roll = qcycles::delta(q_roll_start, qcycles::now());
 
     // Final scan after both phases have returned to this shallow frame.
     m.stack = stack_high_water_bytes();
@@ -1228,6 +1850,54 @@ pub extern "C" fn main() -> ! {
 
     print_result(&m);
 
+    #[cfg(feature = "qemu-cycles")]
+    {
+        // Deterministic SysTick-tick cost of each phase (QEMU virtual time; see
+        // mod qcycles for the calibration).  Deliberately a separate line so
+        // the documented QEMU RESULT baseline (feature off) stays identical.
+        let total = q_mount
+            .wrapping_add(q_kv)
+            .wrapping_add(q_ts)
+            .wrapping_add(q_roll);
+        write_bytes(b"QEMU_CYCLES unit=systick spin_insn=\0");
+        write_u32(qcycles::SPIN_INSTRUCTIONS);
+        write_bytes(b" spin_ticks=\0");
+        write_u32(qcycles::spin_ticks());
+        write_bytes(b" mount=\0");
+        write_u32(q_mount);
+        write_bytes(b" kv=\0");
+        write_u32(q_kv);
+        write_bytes(b" ts=\0");
+        write_u32(q_ts);
+        write_bytes(b" roll=\0");
+        write_u32(q_roll);
+        write_bytes(b" total=\0");
+        write_u32(total);
+        write_bytes(b" roll_appends=\0");
+        write_u32(q_roll_result.appends);
+        write_bytes(b" roll_count=\0");
+        write_u32(q_roll_result.count);
+        write_bytes(b" roll_checksum=\0");
+        write_hex32(q_roll_result.checksum);
+        write_bytes(b" remount_count=\0");
+        write_u32(q_roll_result.remount_count);
+        write_bytes(b" remount_checksum=\0");
+        write_hex32(q_roll_result.remount_checksum);
+        write_bytes(b" continue_ok=\0");
+        write_u32(q_roll_result.continue_ok);
+        write_bytes(b" stack=\0");
+        write_u32(m.stack);
+        write_bytes(b"\n\0");
+    }
+
+    #[cfg(feature = "board-u545")]
+    {
+        // Raw partition fingerprints: byte-level C/Rust image identity.
+        m.kv_image_checksum = image_checksum(kv_flash());
+        m.ts_image_checksum = image_checksum(ts_flash());
+        print_rollover_result(&m);
+    }
+
     #[cfg(feature = "board-u545")]
     {
         write_bytes(b"BOARD cycles_mount=\0");
@@ -1236,9 +1906,13 @@ pub extern "C" fn main() -> ! {
         write_u32(cycles_kv);
         write_bytes(b" cycles_ts=\0");
         write_u32(cycles_ts);
+        write_bytes(b" cycles_roll=\0");
+        write_u32(cycles_roll);
         write_bytes(b" cycles_total=\0");
         write_u32(board::cycles());
-        write_bytes(b" core_hz=16000000\n\0");
+        write_bytes(b" core_hz=\0");
+        write_u32(board::core_hz());
+        write_bytes(b"\n\0");
     }
     exit()
 }

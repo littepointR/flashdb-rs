@@ -69,9 +69,33 @@ struct harness_metrics {
     uint32_t ts_appends;
     uint32_t ts_iterated;
     uint32_t ts_checksum;
+#ifdef FDB_BOARD_U545
+    /* Real-board rollover phase (see c/main.c ts_rollover_phase): ring fill,
+     * live-window integrity, NOR simulation health and remount recovery.
+     * Zero in QEMU builds, never printed there. */
+    uint32_t ts_roll_appends;
+    uint32_t ts_roll_erases;
+    uint32_t ts_roll_violations;
+    uint32_t ts_roll_count;
+    uint32_t ts_roll_first_time;
+    uint32_t ts_roll_last_time;
+    uint32_t ts_roll_checksum;
+    uint32_t ts_roll_remount_count;
+    uint32_t ts_roll_remount_checksum;
+    uint32_t ts_roll_continue_ok;
+    /* FNV-1a over the raw KV / TS partition images after the whole workload:
+     * byte-level C/Rust image identity on silicon. */
+    uint32_t kv_image_checksum;
+    uint32_t ts_image_checksum;
+#endif
 };
 
 void harness_print_result(const struct harness_metrics *m);
+
+#ifdef FDB_BOARD_U545
+/* Print the second RESULT line with the rollover-phase fields (board only). */
+void harness_print_rollover(const struct harness_metrics *m);
+#endif
 
 /* Print "ERROR stage=<stage> code=<code>" and terminate the emulator. */
 void harness_fail(const char *stage, int code) __attribute__((noreturn));

@@ -16,11 +16,15 @@ directly comparable: **ROM** (`.text`/`.rodata`/`.data`), **static RAM**
 through ARM semihosting (no UART driver):
 
 ```
-RESULT text=11232 rodata=1428 data=0 bss=552 sim_flash=16384 stack=2000 \
-       stack_init=2000 stack_limit=8192 kv_writes=1596 kv_gets=64 \
-       kv_iterated=64 kv_checksum=0x4b3486a4 kv_iter_checksum=0x2c2ba40a \
+RESULT text=11116 rodata=508 data=0 bss=624 sim_flash=32768 stack=1008 \
+       stack_init=336 stack_limit=8192 kv_writes=1596 kv_gets=64 \
+       kv_iterated=64 kv_checksum=0x4b3486a4 kv_iter_checksum=0x0e250daa \
        ts_appends=200 ts_iterated=200 ts_checksum=0x10d90680 rc=0
 ```
+
+The same Rust firmware also runs on a **NUCLEO-U545RE-Q** (STM32U545RE,
+Cortex-M33) with probe-rs for on-silicon verification: see
+[`u545re/README.md`](u545re/README.md).
 
 ---
 
@@ -37,12 +41,24 @@ RESULT text=11232 rodata=1428 data=0 bss=552 sim_flash=16384 stack=2000 \
 ./scripts/fw_rust.sh size            # opt-level="z" + LTO "size" profile
 ./scripts/fw_rust.sh --phases        # diagnostic build: per-phase stack peaks
 ./scripts/fw_rust.sh --symbols       # symbol-level ROM/RAM attribution tables
+./scripts/fw_rust.sh --small-crc     # 64-byte nibble CRC table
 ./scripts/fw_rust.sh size --phases --symbols
 ./scripts/fw_c.sh --phases           # same per-phase diagnostic run for C
 ./scripts/fw_c.sh --symbols          # C symbol attribution + per-object sizes
 ./scripts/fw_c.sh --build-only       # build + sizes only, no QEMU
 ./scripts/fw_c.sh --clean            # remove build products (both scripts)
 ```
+
+Windows/PowerShell (same firmware, same numbers — see also
+[`u545re/README.md`](u545re/README.md)):
+
+```powershell
+pwsh -NoProfile -File scripts/fw_rust.ps1 -Profile size -SmallCrc -Phases
+pwsh -NoProfile -File scripts/fw_rust.ps1 -Profile size -SmallCrc -Cycles   # QEMU cycle proxy
+pwsh -NoProfile -File scripts/fw_rust.ps1 -Profile release -BuildOnly
+pwsh -NoProfile -File scripts/fw_rust.ps1 -InlineThreshold -1               # flag-free A/B
+```
+
 
 Exit status is 0 only when the firmware actually ran and printed a `RESULT`
 line with `rc=0`; a hang (hard fault) or a workload failure makes the script
@@ -72,15 +88,16 @@ build/
 
 | tool | version / path |
 |---|---|
-| `arm-none-eabi-gcc` | GCC 16.1.0, `/opt/homebrew/bin` (binutils 2.46) |
-| `qemu-system-arm` | QEMU 11.0.0, `/opt/homebrew/bin` |
-| `rustc` / `cargo` | 1.96.1 with `thumbv7m-none-eabi` installed |
-| host | macOS arm64 |
+| `arm-none-eabi-gcc` | GCC 11.3 (GNU Tools for STM32 bundled with STM32CubeIDE 1.13.2 on Windows); GCC 16.1.0 on the original macOS authoring machine |
+| `qemu-system-arm` | QEMU 8.2.0 (Windows), QEMU 11.0.0 (macOS) |
+| `rustc` / `cargo` | 1.99.0 with `thumbv7m-none-eabi` installed (nightly for the `-Nightly` layout) |
+| host | Windows 11 / PowerShell 7 (verified this round), macOS arm64 |
 
-Do **not** link with the host Apple linker: it lacks `--gc-sections` and does
-not understand the bare-metal linker script. Both builds drive
+Do **not** link with the host linker: it lacks `--gc-sections` and does not
+understand the bare-metal linker script. Both builds drive
 `arm-none-eabi-ld` through `arm-none-eabi-gcc` (Rust sets
-`CARGO_TARGET_THUMBV7M_NONE_EABI_LINKER=arm-none-eabi-gcc`).
+`CARGO_TARGET_THUMBV7M_NONE_EABI_LINKER=arm-none-eabi-gcc`); on Windows the
+scripts auto-detect the CubeIDE toolchain.
 
 ### QEMU machine choice
 
@@ -253,13 +270,23 @@ cargo rustc --bin fw-rust --target thumbv7m-none-eabi --offline --release -- \
     -C link-arg=-Wl,--gc-sections -C link-arg=-lgcc
 ```
 
-Build profiles:
+Build profiles and codegen knobs:
 
 * `release`: `opt-level="s"`, `lto=true`, `codegen-units=1`, `panic="abort"`.
 * `size`: `opt-level="z"`, `lto=true` (`./scripts/fw_rust.sh size`).
+* `-InlineThreshold 50` (default; `-1` = off): LLVM
+  `-C llvm-args=-inline-threshold=50`. The `-Oz` default inliner is too
+  conservative for the flashdb call chains: this flag is −84 B ROM and
+  −22 % TS / −21 % rollover CPU on silicon. See `docs/OPTIMIZATION.md`.
+* `-Icf`: LLD `--icf=all` (GNU ld has no ICF; the QEMU scripts switch to
+  rust-lld when this knob is used). Board links always use it (−28 B).
 * Harness features (off by default, for diagnostics/measurement only):
-  `stack-phases` (`--phases`), and `small-crc` (`--small-crc`, passthrough of
-  the crate's 64-byte nibble CRC table).
+  `stack-phases` (`--phases`), `qemu-cycles` (`-Cycles`, QEMU SysTick +
+  `-icount` cycle proxy) and `small-crc` (`--small-crc`/`-SmallCrc`,
+  passthrough of the crate's 64-byte nibble CRC table).
+* The nightly path (`scripts/fw_rust.ps1 -Nightly` / `board_common.ps1
+  -Nightly`) adds `-Z build-std=core`, `panic="immediate-abort"`,
+  `-Z location-detail=none` and `--icf=all`; it produces the smallest image.
 * Both databases use the crate's placement mounts (`Kvdb::mount_into`,
   `Tsdb::mount_into`), so they are built directly in `.bss` without a stack
   copy of the database structs.
@@ -373,143 +400,109 @@ boot, exactly like the C firmware's first-boot path.
 
 ## Measurement results
 
-**Frozen crate revision:** `e931c9d` (= `1486135` + docs-only commit), verified stable.
-**Harness:** this working tree (TS placement mount + `--small-crc` passthrough;
-no crate changes). Host: macOS arm64, QEMU 11.0.0, `mps2-an385`,
-`arm-none-eabi-gcc` 16.1.0 / binutils 2.46, rustc 1.96.1.
+Current working tree, measured 2026-10-23. The headline numbers use the
+acceptance configuration: `size` (`-z`) or `release` (`-s`) profile with
+`small-crc`, LLD `--icf=all` and `-C llvm-args=-inline-threshold=50` (the
+default of `scripts/fw_rust.ps1`; pass `-InlineThreshold -1` to reproduce the
+old flag-free baseline). All numbers are whole-image sections from
+`arm-none-eabi-size -A`, cross-checked against the linker-symbol values in the
+`RESULT` line. `sim_flash` (32 KiB simulated external NOR) is never counted as
+ROM or MCU RAM.
 
-Commands: `./scripts/fw_c.sh [--phases]`, `./scripts/fw_rust.sh [size]
-[--phases] [--symbols] [--small-crc]`. All numbers below are whole-image
-sections from `arm-none-eabi-size -A`, cross-checked against the linker-symbol
-values in the `RESULT` line. `sim_flash` (32 KiB simulated external NOR) is
-never counted as ROM or MCU RAM.
+### Headline: ROM, static RAM, stack
 
-**Configuration labels**
-
-* **C**: upstream FlashDB + FAL, `-Os`, `FDB_WRITE_GRAN=8`, logging compiled
-  out, 16 KiB KV + 16 KiB TS partitions.
-* **Rust `-s`**: `opt-level="s"` + fat LTO, default crate features (256-entry
-  CRC table), same workload/partitions.
-* **Rust `-z`**: `opt-level="z"` + fat LTO, default crate features.
-* **Rust `-s`/`-z` + `small-crc`**: optional crate feature (64-byte nibble
-  CRC table, ~2× CRC CPU); secondary measurement only.
-* `--phases`/`stack-phases` is a **diagnostic-only** build and never used for
-  the headline ROM/RAM numbers.
-
-### Headline: ROM, static RAM, stack (default config)
-
-| metric | C (FlashDB+FAL, `-Os`) | Rust `-s` (default) | Rust `-z` (default) |
+| metric | C (FlashDB+FAL, `-Os`) | Rust `-s` | Rust `-z` |
 |---|---|---|---|
-| `.text` | 9720 | 14576 | 13016 |
-| `.rodata` | 1632 | 1448 | 1448 |
+| `.text` | 9720 | 12836 | 11116 |
+| `.rodata` | 1632 | 508 | 508 |
 | `.data` | 56 | 0 | 0 |
-| **ROM total** (`text+rodata+data`) | **11408** | **16024** | **14464** |
+| **ROM total** (`text+rodata+data`) | **11408** | **13344** | **11624** |
 | `.bss` | 1008 | 624 | 624 |
 | **static RAM** (`data+bss`) | **1064** | **624** | **624** |
-| **stack high-water** | **1192** | **1312** | **1432** |
-| **total RAM** (static+stack) | **2256** | **1936** | **2056** |
-| stack after init (= mount phase) | 696 | 880 | 928 |
+| **stack high-water** | **1192** | **1008** | **1008** |
+| **total RAM** (static+stack) | **2256** | **1632** | **1632** |
+| stack after init (= mount phase) | 696 | 296 | 336 |
 | stack limit | 8192 | 8192 | 8192 |
 | simulated NOR (excluded) | 32768 | 32768 | 32768 |
 | KV checksum / iter checksum | `0x4b3486a4` / `0x0e250daa` | same | same |
 | TS checksum | `0x10d90680` | same | same |
 
-Rust static RAM is 440 B lower than C; the release (`-s`) profile now has
-lower total RAM than C (1936 vs 2256 B). ROM is still 4.7 KiB (`-s`) /
-3.2 KiB (`-z`) above C; see the attribution section.
+The QEMU `-z` image is still +216 B ROM over C because its `.text` is larger;
+the `.rodata` advantage is smaller than on the board. **On real silicon the
+acceptance passes** (ROM −28 B stable / −64 B nightly) — see
+[`u545re/README.md`](u545re/README.md); the board is the normative footprint
+target because it includes the rollover workload and the board backend.
 
-### Secondary: `small-crc` feature (optional, non-default)
+### Default-CRC reference (continuity)
 
-| metric | Rust `-s` + small-crc | Rust `-z` + small-crc |
+| metric | Rust `-s` default CRC | Rust `-z` default CRC |
 |---|---|---|
-| `.text` | 14720 | 13028 |
-| `.rodata` | **488** | **488** |
-| **ROM total** | **15208** | **13516** |
+| `.text` | 12712 | 11256 |
+| `.rodata` | 1468 | 1468 |
+| **ROM total** | **14180** | **12724** |
 | `.bss` / static RAM | 624 / 624 | 624 / 624 |
-| stack high-water | 1312 | 1432 |
-| total RAM | 1936 | 2056 |
+| stack high-water | 1008 | 1008 |
 
-`small-crc` saves 816 B (`-s`) / 948 B (`-z`) of ROM versus the default, at
-~2× CRC32 CPU cost; stack/RAM are unchanged and all checksums stay identical.
+`small-crc` saves 836 B (`-s`) / 1100 B (`-z`) of the QEMU image versus the
+default CRC table, at ~2× CRC32 CPU cost; stack/RAM are unchanged and all
+checksums stay identical.
 
-**Caveat:** at `27c8e6b` the `small-crc` crate feature does **not compile** as
-shipped: the feature-gated `pub fn crc32` in `crates/flashdb/src/low.rs:233`
-has no doc comment and the crate has `#![deny(missing_docs)]`. The numbers
-above were measured after adding that one-line doc comment to a temporary copy
-of the crate (no code change); the default (non-small-crc) build is
-unaffected. One-line crate fix needed if the feature should be usable:
-`/// ...` above that function.
-
-### Per-phase stack (`--phases` builds)
+### Per-phase stack (`--phases` builds, threshold-50 codegen)
 
 | phase | C | Rust `-s` | Rust `-z` |
 |---|---|---|---|
-| mount/init (`stack_init`) | 752 | 912 | 952 |
-| one KV set | 736 | 952 | 984 |
-| one KV get | 720 | 1056 | 1048 |
-| full KV iteration | 560 | 784 | 856 |
-| KV GC churn (1500 writes) | 1248 | 1424 | 1528 |
-| one TS append | 528 | 680 | 728 |
-| full TS iteration | 568 | 824 | 840 |
-| headline `stack` (max) | 1192 | 1312 | 1432 |
+| mount/init (`stack_init`) | 752 | 320 | 360 |
+| one KV set | 736 | 608 | 688 |
+| one KV get | 720 | 632 | 728 |
+| full KV iteration | 560 | 656 | 760 |
+| KV GC churn (1500 writes) | 1248 | 976 | 1056 |
+| one TS append | 528 | 496 | 568 |
+| full TS iteration | 568 | 656 | 768 |
+| headline `stack` (non-diagnostic build) | 1192 | 1008 | 1008 |
 
-Diagnostic-build ROM (not comparable to the headline):
-C 12032, Rust `-s` 17964, Rust `-z` 16148.
+Diagnostic-build ROM: C 12032, Rust `-s` 15144, Rust `-z` 13044.
 Per-phase numbers include each firmware's diagnostic frame (~100–300 B,
 present on both sides); compare deltas, not absolutes. The headline stack
-values (1312/1432 B) come from the non-diagnostic build.
+values come from the non-diagnostic build.
 
-### ROM attribution (bucketed code symbols, `--symbols`)
+### ROM attribution (board nightly ELF, generated by `--symbols`)
 
-| bucket | C | Rust `-s` | Rust `-z` |
-|---|---|---|---|
-| library code | 7674 (FlashDB/FAL, KV+TS) | 9038 (flashdb, KV+TS) | 7272 (flashdb, KV+TS) |
-| harness code | 2030 | 5460¹ | 5244¹ |
-| core/panic + outliner stubs | – | 30 | 450 |
-| toolchain mem helpers | (inside harness/libgcc) | 138 | 138 |
-| `.text` (size -A) | 9720 | 14576 | 13016 |
+| bucket | bytes | share |
+|---|---|---|
+| flashdb crate | 7754 | 61.8 % |
+| harness (`fw_rust`) | 4538 | 36.2 % |
+| toolchain mem/aeabi | 138 | 1.1 % |
+| outliner stubs | 108 | 0.9 % |
+| `.text` (size -A) | 12444 | 100 % |
 
-¹ includes crate mount/append bodies inlined by LTO into the harness wrappers
-(`kv_mount`, `ts_mount`, `kv_put`, `tsdb_phase`). The bucket is therefore an
-upper bound on harness code; crate-side `#[inline(never)]` work reduces it
-without harness changes.
+Largest symbols: `kv_phase` 764, `kv_mount` 640, `gc_collect_by_free_size` 616,
+TS `mount_into` 548, `move_kv` 436, TS `read_sec_into` 432, `alloc_kv` 416,
+`kv_put` 352, `main` 352. The harness bucket includes crate mount/append bodies
+inlined by LTO into the workload wrappers, so treat it as an upper bound.
 
-**Genuine harness estimate** (opaque-boundary method: call `Kvdb::set`,
-`Tsdb::append`, `Kvdb::mount_into` and `Tsdb::mount_into` through
-`black_box`ed function pointers so their bodies are attributed to the crate;
-this changes no behaviour and is measurement-only because the barriers grow
-the total image): **2,452 B at `-z`** and **2,752 B at `-s`**, down from
-3,080 B / 3,030 B before this pass. The `-z` figure meets the 2.6 KiB target;
-the harness bucket's remaining ~2.8 KiB (`-z`) is inlined crate code.
+### What is harness-side vs crate-side
 
-### What is harness-side vs crate-side (frozen `27c8e6b`)
-
-* **Static RAM**: Rust wins clearly (624 vs 1064 B static; `Tsdb` is 56 B,
-  KVDB uses a compact placement mount) and total RAM is 320 B lower than C at
-  `-s` (1936 vs 2256), 200 B lower at `-z`.
-* **Stack**: Rust `-s` is 120 B above C (1312 vs 1192); the mount phase is
-  880 vs 696 B. This is crate call depth (mount/GC paths), not harness
-  scaffolding; the harness pass left stack unchanged.
-* **ROM**: Rust is 4616 B (`-s`) / 3056 B (`-z`) above C. Attribution: crate
-  named code is 9038 B (`-s`) / 7272 B (`-z`) vs C's 7674 B library, and the
-  harness bucket (5460 / 5244 B) still contains inlined crate mount/append
-  bodies (~2.8 KiB at `-z`). Genuine harness code is 2752 B (`-s`) / 2452 B
-  (`-z`) vs C's 2030 B; Rust runtime baseline adds 30 B (`-s`) / 450 B (`-z`,
-  outliner + slice helpers). The remaining harness delta is mostly
-  bounds-checked safe code, the generic error plumbing and the workload's
-  verification/checksums — all of which are kept intentionally.
-* `small-crc` is the cheapest remaining ROM lever (816–948 B) if a slower
-  CRC32 is acceptable.
+* **Static RAM**: Rust wins clearly (624 vs 1064 B QEMU; 640 vs 1072 B board).
+* **Stack**: Rust wins (1008 vs 1192 B QEMU; 1072 vs 1240 B board).
+* **ROM**: board parity achieved; QEMU `-z` is +216 B. The residual is `.text`
+  (crate safe code, error plumbing, monomorphisation), which on the board is
+  offset by the smaller `.rodata` (64-byte CRC table + shorter labels).
+* **CPU**: the board acceptance is faster than C in every phase (total −34.6 %
+  stable `size`, −43.0 % `release`). The QEMU cycle proxy
+  (`scripts/fw_rust.ps1 -Cycles`, SysTick + `-icount`, 40 instructions/tick,
+  deterministic) is available for A/B work without hardware; use ratios, not
+  absolutes.
 
 ### Reproducibility
 
 C compilation is byte-for-byte reproducible. Rust LTO/codegen layout can vary
 by a few tens of bytes of `.text` between rebuilds (checksums and section
-classes do not change). The tables are from clean `--clean` builds against the
-frozen crate revision above; re-run both scripts after any crate change.
+classes do not change). The tables are from clean builds on the current tree;
+re-run both scripts after any crate change. On Windows, `scripts/fw_rust.ps1`
+exposes the same knobs (`-Profile`, `-SmallCrc`, `-Phases`, `-Symbols`,
+`-BuildOnly`, `-InlineThreshold`, `-Cycles`).
 
 ---
-
 ## Troubleshooting
 
 * **Hang / no `RESULT` line**: usually a hard fault or QEMU started without

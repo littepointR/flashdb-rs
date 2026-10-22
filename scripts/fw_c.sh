@@ -8,11 +8,18 @@
 # semihosting RESULT line with ROM/RAM section sizes, worst-case stack and
 # deterministic workload checksums.
 #
+# `--board-u545` builds the same harness for the real NUCLEO-U545RE-Q
+# (STM32U545RE, Cortex-M33) instead: RAM result buffer + DWT cycles
+# (-DFDB_BOARD_U545, harness/firmware/u545re/board.ld).  No QEMU is run; flash
+# and read back with harness/firmware/u545re/run_c.ps1 (Windows) or compare
+# against the Rust image with harness/firmware/u545re/compare.ps1.
+#
 # Usage:
 #   scripts/fw_c.sh                 # build + run (baseline build)
 #   scripts/fw_c.sh --phases        # diagnostic build with per-phase stack peaks
 #   scripts/fw_c.sh --symbols       # also print symbol-level size attribution
 #   scripts/fw_c.sh --build-only    # build, print sizes, do not run QEMU
+#   scripts/fw_c.sh --board-u545    # build the NUCLEO-U545RE-Q image (no QEMU)
 #   scripts/fw_c.sh --clean         # remove build products first
 #   scripts/fw_c.sh --help
 #
@@ -32,6 +39,10 @@ OBJ="$BUILD/obj"
 ELF="$BUILD/fw_c.elf"
 MAP="$BUILD/fw_c.map"
 
+BOARD=0
+MCPU=cortex-m3
+LD="$FW/common/mps2_an385.ld"
+
 CC="${CC:-arm-none-eabi-gcc}"
 SIZE="${SIZE:-arm-none-eabi-size}"
 QEMU="${QEMU:-qemu-system-arm}"
@@ -43,7 +54,7 @@ QEMU_TIMEOUT="${QEMU_TIMEOUT:-30}"
 #   FAL mode, NOR flash (byte programmable => FDB_WRITE_GRAN=8), KVDB + TSDB,
 #   library logging compiled out, no file mode.
 CFLAGS=(
-  -mcpu=cortex-m3 -mthumb -mfloat-abi=soft
+  -mthumb -mfloat-abi=soft
   -Os -std=gnu11 -Wall
   -ffunction-sections -fdata-sections -fno-common
   -fno-builtin -fno-stack-protector -ffreestanding
@@ -82,7 +93,19 @@ die() {
 }
 
 usage() {
-  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  cat >&2 <<'EOF'
+Usage: scripts/fw_c.sh [options]
+
+  --build-only        build, print sizes, do not run QEMU
+  --phases            diagnostic build with per-phase stack peaks
+  --symbols           print symbol-level size attribution
+  --board-u545        build the NUCLEO-U545RE-Q image (Cortex-M33, no QEMU)
+  --clean             remove build products first
+  -h, --help          show this help
+
+Environment: CC, SIZE, QEMU, QEMU_TIMEOUT, QEMU_MACHINE, QEMU_CPU.
+Requires reference/FlashDB (scripts/fetch_reference.sh) and arm-none-eabi-gcc.
+EOF
   exit 0
 }
 
@@ -97,9 +120,24 @@ for arg in "$@"; do
     --clean) CLEAN=1 ;;
     --phases) PHASES=1 ;;
     --symbols) SYMBOLS=1 ;;
+    --board-u545) BOARD=1 ;;
     *) die "unknown argument: $arg (try --help)" ;;
   esac
 done
+
+if [ "$BOARD" = "1" ]; then
+  # Real-board image: Cortex-M33, board linker script, RAM result buffer and
+  # DWT cycle counters instead of semihosting (see common/board_u545.c).
+  BUILD="$FW/build/c_u545"
+  OBJ="$BUILD/obj"
+  ELF="$BUILD/fw_c_u545.elf"
+  MAP="$BUILD/fw_c_u545.map"
+  MCPU=cortex-m33
+  LD="$FW/u545re/board.ld"
+  CFLAGS+=(-DFDB_BOARD_U545)
+  HARNESS_SRCS+=("$FW/common/board_u545.c")
+fi
+CFLAGS+=(-mcpu="$MCPU")
 
 if [ "$PHASES" = "1" ]; then
   # Diagnostic build: adds the per-phase stack-attribution code (common/stack.c,
@@ -110,7 +148,9 @@ fi
 
 command -v "$CC" >/dev/null 2>&1 || die "C compiler not found: $CC (set CC=...)"
 command -v "$SIZE" >/dev/null 2>&1 || die "size tool not found: $SIZE (set SIZE=...)"
-command -v "$QEMU" >/dev/null 2>&1 || die "QEMU not found: $QEMU (set QEMU=...)"
+if [ "$BOARD" = "0" ]; then
+  command -v "$QEMU" >/dev/null 2>&1 || die "QEMU not found: $QEMU (set QEMU=...)"
+fi
 [ -d "$REF/src" ] || die "reference FlashDB clone not found at $REF"
 
 if [ "$CLEAN" = "1" ]; then
@@ -123,7 +163,11 @@ mkdir -p "$OBJ"
 # ---------------------------------------------------------------------------
 echo "== C FlashDB baseline firmware =="
 echo "   compiler : $("$CC" --version | head -1)"
-echo "   target   : cortex-m3 / thumbv7m / MPS2-AN385 (qemu: $QEMU_MACHINE)"
+if [ "$BOARD" = "1" ]; then
+  echo "   target   : cortex-m33 / thumbv8m / NUCLEO-U545RE-Q (RAM output + DWT)"
+else
+  echo "   target   : cortex-m3 / thumbv7m / MPS2-AN385 (qemu: $QEMU_MACHINE)"
+fi
 echo "   config   : FDB_WRITE_GRAN=8, FAL mode, KVDB+TSDB, logging compiled out"
 if [ "$PHASES" = "1" ]; then
   echo "   mode     : DIAGNOSTIC (per-phase stack attribution; not the baseline build)"
@@ -150,8 +194,8 @@ for src in "${LIB_SRCS[@]}" "${HARNESS_SRCS[@]}"; do
 done
 [ "$COMPILE_FAIL" = "0" ] || die "compilation failed"
 
-if ! "$CC" -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -nostdlib -nostartfiles \
-      -Wl,--gc-sections -Wl,-Map="$MAP" -T"$FW/common/mps2_an385.ld" \
+if ! "$CC" -mcpu="$MCPU" -mthumb -mfloat-abi=soft -nostdlib -nostartfiles \
+      -Wl,--gc-sections -Wl,-Map="$MAP" -T"$LD" \
       -o "$ELF" "${OBJS[@]}" -lgcc 2>"$BUILD/link.log"; then
   cat "$BUILD/link.log" >&2
   die "link failed (map file: $MAP)"
@@ -191,6 +235,14 @@ if [ "$SYMBOLS" = "1" ]; then
   command -v python3 >/dev/null 2>&1 || die "python3 is required for --symbols"
   python3 "$FW/tools/symbol_report.py" "$ELF" --kind c --objdir "$OBJ" || die "symbol report failed"
   echo
+fi
+
+if [ "$BOARD" = "1" ]; then
+  echo "   real-board image: flash + read back with"
+  echo "     harness/firmware/u545re/run_c.ps1        (Windows)"
+  echo "     harness/firmware/u545re/compare.ps1      (C vs Rust on identical silicon)"
+  echo "   build only: no QEMU run for the NUCLEO-U545RE-Q image"
+  exit 0
 fi
 
 if [ "$BUILD_ONLY" = "1" ]; then

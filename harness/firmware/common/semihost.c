@@ -12,6 +12,11 @@
  */
 #include "semihost.h"
 
+#ifdef FDB_BOARD_U545
+#include "board_u545.h"
+#endif
+
+#ifndef FDB_BOARD_U545
 static void sh_call(uint32_t op, const void *arg)
 {
     register uint32_t r0 __asm__("r0") = op;
@@ -20,10 +25,16 @@ static void sh_call(uint32_t op, const void *arg)
     __asm__ volatile("bkpt 0xab" : "+r"(r0) : "r"(r1) : "memory");
     (void)r0;
 }
+#endif
 
 void sh_write0(const char *s)
 {
+#ifdef FDB_BOARD_U545
+    /* Board build: no semihosting console, append to the RAM result buffer. */
+    board_sh_write0(s);
+#else
     sh_call(SEMIHOST_SYS_WRITE0, (const void *)s);
+#endif
 }
 
 void sh_write_u32(uint32_t value)
@@ -149,6 +160,37 @@ void harness_print_result(const struct harness_metrics *m)
     sh_write0(" rc=0\n");
 }
 
+#ifdef FDB_BOARD_U545
+void harness_print_rollover(const struct harness_metrics *m)
+{
+    sh_write0("RESULT ts_roll_appends=");
+    sh_write_u32(m->ts_roll_appends);
+    sh_write0(" ts_roll_erases=");
+    sh_write_u32(m->ts_roll_erases);
+    sh_write0(" ts_roll_violations=");
+    sh_write_u32(m->ts_roll_violations);
+    sh_write0(" ts_roll_count=");
+    sh_write_u32(m->ts_roll_count);
+    sh_write0(" ts_roll_first_time=");
+    sh_write_u32(m->ts_roll_first_time);
+    sh_write0(" ts_roll_last_time=");
+    sh_write_u32(m->ts_roll_last_time);
+    sh_write0(" ts_roll_checksum=");
+    sh_write_hex32(m->ts_roll_checksum);
+    sh_write0(" ts_roll_remount_count=");
+    sh_write_u32(m->ts_roll_remount_count);
+    sh_write0(" ts_roll_remount_checksum=");
+    sh_write_hex32(m->ts_roll_remount_checksum);
+    sh_write0(" ts_roll_continue_ok=");
+    sh_write_u32(m->ts_roll_continue_ok);
+    sh_write0(" kv_image_checksum=");
+    sh_write_hex32(m->kv_image_checksum);
+    sh_write0(" ts_image_checksum=");
+    sh_write_hex32(m->ts_image_checksum);
+    sh_write0("\n");
+}
+#endif /* FDB_BOARD_U545 */
+
 void harness_fail(const char *stage, int code)
 {
     sh_write0("ERROR stage=");
@@ -162,8 +204,13 @@ void harness_fail(const char *stage, int code)
 
 void harness_exit(void)
 {
+#ifdef FDB_BOARD_U545
+    /* Board build: publish the output and spin so the probe can read it. */
+    board_exit();
+#else
     sh_call(SEMIHOST_SYS_EXIT, (const void *)(uintptr_t)SEMIHOST_ADP_STOPPED_APP_EXIT);
     for (;;) {
         /* QEMU should have terminated already; spin if semihosting is absent. */
     }
+#endif
 }

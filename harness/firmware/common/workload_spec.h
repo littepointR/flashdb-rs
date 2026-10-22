@@ -32,6 +32,11 @@
 #define HW_TS_PAYLOAD_LEN      16
 /* Fake clock origin; harness_get_time() returns base + append index. */
 #define HW_TS_BASE_TIME        1000
+/* Real-board rollover phase (FDB_BOARD_U545 only): appends past the ring
+ * capacity of the 16 KiB / 4-sector TS partition (~448 x 16-byte entries), so
+ * the ring wraps several times before the live window and recovery are
+ * verified.  Mirrored by TS_ROLL_APPENDS in rust/main.rs. */
+#define HW_TS_ROLL_APPENDS     1200
 
 /* ---- Database geometry ------------------------------------------------ */
 /* FAL flash device: 32 KiB simulated NOR, 4 KiB erase blocks.

@@ -28,6 +28,14 @@ stack-phases = []
 # of the 1 KiB byte table, ~2x CRC CPU).  Used for the optional secondary
 # measurement (`scripts/fw_rust.sh size --small-crc`); default stays untouched.
 small-crc = ["flashdb/small-crc"]
+# QEMU cycle/instruction proxy (NON-default, QEMU builds only).  Instrument the
+# phase boundaries with ARM semihosting SYS_ELAPSED (0x30) / SYS_TICKFREQ (0x31)
+# and run the board rollover workload, so the -z profile's TS/rollover cycle
+# cost can be iterated without silicon: under `qemu-system-arm -icount shift=0`
+# one virtual tick is one executed instruction, which makes the measurement
+# deterministic and instruction-exact.  Off by default so the documented QEMU
+# RESULT baseline stays byte-identical.
+qemu-cycles = []
 
 [dependencies]
 # Real Rust rewrite under measurement (no_std, no external dependencies).

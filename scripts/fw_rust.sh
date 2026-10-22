@@ -18,6 +18,8 @@
 #   scripts/fw_rust.sh --phases        # diagnostic build with per-phase stack peaks
 #   scripts/fw_rust.sh --symbols       # also print symbol-level size attribution
 #   scripts/fw_rust.sh --small-crc     # opt-in crate feature: 64-byte CRC table (-960B rodata)
+#   scripts/fw_rust.sh --inline-threshold=N   # LLVM -inline-threshold (default 50)
+#   scripts/fw_rust.sh --icf           # link with rust-lld + --icf=all (GNU ld has no ICF)
 #   scripts/fw_rust.sh size --phases --symbols   # flags compose
 #   scripts/fw_rust.sh --build-only    # build + sizes only, no QEMU
 #   scripts/fw_rust.sh --clean         # remove cargo target dir first
@@ -26,6 +28,7 @@
 # Environment overrides:
 #   CARGO=cargo  RUSTC=rustc  QEMU=qemu-system-arm
 #   QEMU_TIMEOUT=30  QEMU_MACHINE=mps2-an385  QEMU_CPU=cortex-m3
+#   INLINE_THRESHOLD=50   # same default as the scripts/fw_rust.ps1 parameter
 #
 # Exit status: 0 when the firmware ran and printed a RESULT line with rc=0.
 #
@@ -45,6 +48,11 @@ QEMU_MACHINE="${QEMU_MACHINE:-mps2-an385}"
 QEMU_CPU="${QEMU_CPU:-cortex-m3}"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-30}"
 TARGET="thumbv7m-none-eabi"
+# LLVM -inline-threshold: a codegen knob, passed through cargo rustc.  The -z
+# profile's default inliner is too conservative for this workload; 50 measured
+# -84 B ROM, -24 B stack and TS 531033 -> 414319 / rollover 3184271 -> 2502609
+# board cycles vs the no-flag image (docs/OPTIMIZATION.md, 2026-10-23).
+INLINE_THRESHOLD="${INLINE_THRESHOLD:-50}"
 
 die() {
   echo "fw_rust.sh: ERROR: $*" >&2
@@ -52,7 +60,8 @@ die() {
 }
 
 usage() {
-  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the header comment block (anchored on `set -u` so it survives edits).
+  sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
   exit 0
 }
 
@@ -62,6 +71,7 @@ CLEAN=0
 PHASES=0
 SYMBOLS=0
 SMALL_CRC=0
+ICF=0
 FEATURES=()
 SUFFIX=""
 for arg in "$@"; do
@@ -72,11 +82,17 @@ for arg in "$@"; do
     --phases) PHASES=1 ;;
     --symbols) SYMBOLS=1 ;;
     --small-crc) SMALL_CRC=1 ;;
+    --icf) ICF=1 ;;
+    --inline-threshold=*) INLINE_THRESHOLD="${arg#*=}" ;;
     release) PROFILE="release" ;;
     size) PROFILE="size" ;;
     *) die "unknown argument: $arg (try --help)" ;;
   esac
 done
+
+case "$INLINE_THRESHOLD" in
+  ''|*[!0-9]*) die "invalid --inline-threshold: $INLINE_THRESHOLD (want a non-negative integer)" ;;
+esac
 
 if [ "$PHASES" = "1" ]; then
   # Diagnostic build: per-phase stack-attribution instrumentation.  It is NOT
@@ -91,9 +107,45 @@ if [ "$SMALL_CRC" = "1" ]; then
   FEATURES+=(small-crc)
   SUFFIX="${SUFFIX}_smallcrc"
 fi
+if [ "$INLINE_THRESHOLD" != "50" ]; then
+  # Non-default codegen knob: keep the canonical artifact untouched.
+  SUFFIX="${SUFFIX}_th${INLINE_THRESHOLD}"
+fi
+if [ "$ICF" = "1" ]; then
+  SUFFIX="${SUFFIX}_icf"
+fi
 FEATURE_ARGS=()
 if [ "${#FEATURES[@]}" -gt 0 ]; then
   FEATURE_ARGS=(--features "${FEATURES[@]}")
+fi
+
+# Linker + per-linker flags.  GNU ld (the default, via arm-none-eabi-gcc) has no
+# identical-code folding; --icf=all requires rust-lld, so --icf switches the
+# linker and feeds it libgcc from the same GCC toolchain that links the C image.
+LINKER_ENV="arm-none-eabi-gcc"
+LINK_ARGS=()
+if [ "$ICF" = "1" ]; then
+  command -v arm-none-eabi-gcc >/dev/null 2>&1 || die "arm-none-eabi-gcc not found (needed to locate libgcc for --icf)"
+  HOST_TRIPLE=$("$RUSTC" -vV | sed -n 's/^host: //p')
+  SYSROOT=$("$RUSTC" --print sysroot)
+  RUST_LLD="$SYSROOT/lib/rustlib/$HOST_TRIPLE/bin/rust-lld"
+  [ -x "$RUST_LLD" ] || die "rust-lld not found: $RUST_LLD (needed for --icf)"
+  GCC_LIBGCC_DIR=$(dirname "$(arm-none-eabi-gcc -print-libgcc-file-name)")
+  [ -d "$GCC_LIBGCC_DIR" ] || die "libgcc dir not found: $GCC_LIBGCC_DIR"
+  LINKER_ENV="$RUST_LLD"
+  LINK_ARGS=(
+    -C link-arg=--gc-sections
+    -C link-arg=--icf=all
+    -C link-arg=-L"$GCC_LIBGCC_DIR"
+    -C link-arg=-lgcc
+  )
+else
+  LINK_ARGS=(
+    -C link-arg=-nostartfiles
+    -C link-arg=-nostdlib
+    -C link-arg=-Wl,--gc-sections
+    -C link-arg=-lgcc
+  )
 fi
 
 command -v "$CARGO" >/dev/null 2>&1 || die "cargo not found: $CARGO (set CARGO=...)"
@@ -132,6 +184,12 @@ if [ "$SMALL_CRC" = "1" ]; then
 else
   echo "   crc      : default (256-entry byte table)"
 fi
+echo "   codegen  : -C llvm-args=-inline-threshold=${INLINE_THRESHOLD}"
+if [ "$ICF" = "1" ]; then
+  echo "   linker   : rust-lld (--icf=all)"
+else
+  echo "   linker   : arm-none-eabi-gcc / GNU ld (no --icf)"
+fi
 echo "   output   : $ELF_DIR/fw_rust_${PROFILE}${SUFFIX}.elf"
 echo
 
@@ -139,14 +197,12 @@ BUILD_LOG="$BUILD/cargo.log"
 (
   cd "$RUST_DIR" || exit 1
   CARGO_TARGET_DIR="$BUILD/target" \
-  CARGO_TARGET_THUMBV7M_NONE_EABI_LINKER="arm-none-eabi-gcc" \
+  CARGO_TARGET_THUMBV7M_NONE_EABI_LINKER="$LINKER_ENV" \
   "$CARGO" rustc --bin fw-rust --target "$TARGET" --offline "${PROFILE_ARGS[@]}" \
       ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} -- \
       -C link-arg=-T"$LINKER" \
-      -C link-arg=-nostartfiles \
-      -C link-arg=-nostdlib \
-      -C link-arg=-Wl,--gc-sections \
-      -C link-arg=-lgcc
+      "${LINK_ARGS[@]}" \
+      -C llvm-args=-inline-threshold="$INLINE_THRESHOLD"
 ) >"$BUILD_LOG" 2>&1
 BUILD_RC=$?
 

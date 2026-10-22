@@ -30,6 +30,11 @@
 #include "stack.h"
 #include "workload_spec.h"
 
+#ifdef FDB_BOARD_U545
+#include "board_u545.h"
+#include "sim_stats.h"
+#endif
+
 /* Both database objects are static: they live in .bss, which is exactly the
  * static RAM the measurement wants to capture. */
 static struct fdb_kvdb g_kvdb;
@@ -130,6 +135,17 @@ static void databases_init(void)
     if (err != FDB_NO_ERR) {
         harness_fail("tsdb_init", (int)err);
     }
+
+#ifdef FDB_BOARD_U545
+    /* Explicit, matching the Rust firmware's ts_mount(): the main workload does
+     * not roll over, and both board harnesses must configure the DB alike.  The
+     * QEMU build keeps its historical default (rollover on, never exercised by
+     * the 200-append workload) so its documented RESULT stays unchanged. */
+    {
+        bool ro = false;
+        fdb_tsdb_control(&g_tsdb, FDB_TSDB_CTRL_SET_ROLLOVER, &ro);
+    }
+#endif
 }
 
 /* ------------------------------------------------------------------------- */
@@ -415,6 +431,188 @@ static void stack_diagnostics(struct harness_metrics *m)
 #endif /* HARNESS_STACK_PHASES */
 
 /* ------------------------------------------------------------------------- */
+/* Real-board rollover phase (board build only)                              */
+/* ------------------------------------------------------------------------- */
+
+#ifdef FDB_BOARD_U545
+/*
+ * On-silicon counterpart of the host-side tsdb_rollover tests.  The workload
+ * above appends 200 entries with rollover disabled; this phase enables it,
+ * appends well past the ring capacity (HW_TS_ROLL_APPENDS, several wrap-
+ * arounds), then checks:
+ *   - the live window is a contiguous, increasing timestamp range;
+ *   - every surviving payload still matches the deterministic generator;
+ *   - the ring survives a deinit/init (remount) cycle unchanged;
+ *   - the ring keeps accepting appends after recovery;
+ *   - the NOR simulator saw no set-bit attempts and no out-of-bounds access,
+ *     and at least one sector was erased while rolling.
+ * The Rust firmware runs the identical phase and prints the same RESULT fields,
+ * so compare.ps1 can require field-for-field equality.
+ */
+struct ts_roll_ctx {
+    fdb_tsdb_t db;
+    uint32_t count;
+    uint32_t first;
+    uint32_t last;
+    uint32_t checksum;
+    uint8_t order_ok;
+    uint8_t payload_ok;
+};
+
+static bool ts_roll_cb(fdb_tsl_t tsl, void *arg)
+{
+    struct ts_roll_ctx *ctx = (struct ts_roll_ctx *)arg;
+    uint8_t buf[HW_TS_PAYLOAD_LEN];
+    uint8_t expected[HW_TS_PAYLOAD_LEN];
+    struct fdb_blob blob;
+    size_t got;
+    uint32_t idx;
+
+    got = fdb_blob_read(
+        (fdb_db_t)ctx->db,
+        fdb_tsl_to_blob(tsl, fdb_blob_make(&blob, buf, sizeof(buf))));
+    if (got != HW_TS_PAYLOAD_LEN) {
+        ctx->payload_ok = 0;
+        return true;
+    }
+    if (ctx->count > 0 && tsl->time != (fdb_time_t)(ctx->last + 1u)) {
+        ctx->order_ok = 0;
+    }
+    idx = (uint32_t)(tsl->time - HW_TS_BASE_TIME);
+    make_ts_payload(expected, idx);
+    if (memcmp(buf, expected, HW_TS_PAYLOAD_LEN) != 0) {
+        ctx->payload_ok = 0;
+    }
+    if (ctx->count == 0) {
+        ctx->first = (uint32_t)tsl->time;
+    }
+    ctx->last = (uint32_t)tsl->time;
+    ctx->checksum = fnv1a(ctx->checksum, buf, got);
+    ctx->count++;
+    return false; /* continue iterating */
+}
+
+static void ts_roll_scan(struct ts_roll_ctx *ctx)
+{
+    ctx->db = &g_tsdb;
+    ctx->count = 0;
+    ctx->first = 0;
+    ctx->last = 0;
+    ctx->checksum = 0;
+    ctx->order_ok = 1;
+    ctx->payload_ok = 1;
+    fdb_tsl_iter(&g_tsdb, ts_roll_cb, ctx);
+    if (!ctx->order_ok) {
+        harness_fail("ts_roll_order", 0);
+    }
+    if (!ctx->payload_ok) {
+        harness_fail("ts_roll_payload", 0);
+    }
+}
+
+static void ts_rollover_phase(struct harness_metrics *m)
+{
+    uint8_t payload[HW_TS_PAYLOAD_LEN];
+    struct fdb_blob blob;
+    struct ts_roll_ctx before;
+    struct ts_roll_ctx after;
+    fdb_err_t err;
+    fdb_time_t last;
+    bool ro = true;
+    uint32_t i;
+    uint32_t idx;
+    uint32_t erases;
+    uint32_t violations;
+
+    sim_nor_stats_reset();
+    fdb_tsdb_control(&g_tsdb, FDB_TSDB_CTRL_SET_ROLLOVER, &ro);
+
+    for (i = 0; i < HW_TS_ROLL_APPENDS; i++) {
+        idx = HW_TS_APPENDS + i;
+        make_ts_payload(payload, idx);
+        fdb_blob_make(&blob, payload, sizeof(payload));
+        err = fdb_tsl_append_with_ts(&g_tsdb, &blob,
+                                     (fdb_time_t)(HW_TS_BASE_TIME + idx));
+        if (err != FDB_NO_ERR) {
+            harness_fail("ts_roll_append", (int)err);
+        }
+        m->ts_roll_appends++;
+    }
+
+    ts_roll_scan(&before);
+    if (before.count == 0) {
+        harness_fail("ts_roll_count", 0);
+    }
+    if (before.first + before.count - 1u != before.last) {
+        harness_fail("ts_roll_window", 0);
+    }
+    m->ts_roll_count = before.count;
+    m->ts_roll_first_time = before.first;
+    m->ts_roll_last_time = before.last;
+    m->ts_roll_checksum = before.checksum;
+
+    /* Remount from flash: the ring state must come back identically. */
+    fdb_tsdb_deinit(&g_tsdb);
+    err = fdb_tsdb_init(&g_tsdb, "tsdb", "fdb_tsdb1", harness_get_time,
+                        HW_TSDB_MAX_LEN, NULL);
+    if (err != FDB_NO_ERR) {
+        harness_fail("ts_roll_remount", (int)err);
+    }
+    ts_roll_scan(&after);
+    m->ts_roll_remount_count = after.count;
+    m->ts_roll_remount_checksum = after.checksum;
+    if (after.count != before.count || after.first != before.first ||
+        after.last != before.last || after.checksum != before.checksum) {
+        harness_fail("ts_roll_remount_diff", 0);
+    }
+
+    /* The ring keeps accepting appends after recovery. */
+    idx = HW_TS_APPENDS + HW_TS_ROLL_APPENDS;
+    make_ts_payload(payload, idx);
+    fdb_blob_make(&blob, payload, sizeof(payload));
+    err = fdb_tsl_append_with_ts(&g_tsdb, &blob,
+                                 (fdb_time_t)(HW_TS_BASE_TIME + idx));
+    if (err != FDB_NO_ERR) {
+        harness_fail("ts_roll_continue", (int)err);
+    }
+    fdb_tsdb_control(&g_tsdb, FDB_TSDB_CTRL_GET_LAST_TIME, &last);
+    if (last != (fdb_time_t)(HW_TS_BASE_TIME + idx)) {
+        harness_fail("ts_roll_last_time", 0);
+    }
+    m->ts_roll_continue_ok = 1;
+
+    erases = sim_nor_erases();
+    violations = sim_nor_set_bit_attempts() + sim_nor_bounds_violations();
+    m->ts_roll_erases = erases;
+    m->ts_roll_violations = violations;
+    if (erases == 0) {
+        harness_fail("ts_roll_erases", 0);
+    }
+    if (violations != 0) {
+        harness_fail("ts_roll_nor", (int)violations);
+    }
+}
+#endif /* FDB_BOARD_U545 */
+
+#ifdef FDB_BOARD_U545
+extern uint8_t __sim_flash_start[];
+
+/* FNV-1a over a whole simulated partition: the on-flash image fingerprint used
+ * to prove C/Rust write-identical images on silicon. */
+static uint32_t image_checksum(uint32_t offset, uint32_t len)
+{
+    uint32_t h = 0;
+    uint32_t i;
+
+    for (i = 0; i < len; i++) {
+        h ^= (uint32_t)__sim_flash_start[offset + i];
+        h *= 16777619u;
+    }
+    return h;
+}
+#endif
+
+/* ------------------------------------------------------------------------- */
 /* Entry point                                                               */
 /* ------------------------------------------------------------------------- */
 
@@ -426,13 +624,46 @@ int main(void)
     harness_fill_section_sizes(&m);
     m.stack_limit = stack_limit_bytes();
 
+#ifdef FDB_BOARD_U545
+    /* Real-board build: RAM output buffer + DWT cycle counters, mirroring the
+     * Rust firmware's `board-u545` feature so both images report identical
+     * RESULT/BOARD fields.  Cycle phases are delimited at the same points as
+     * in harness/firmware/rust/main.rs. */
+    uint32_t t0, t_kv, t_ts, t_roll;
+    uint32_t cycles_mount, cycles_kv, cycles_ts, cycles_roll;
+
+    board_reset_output();
+    board_cycles_init();
+    t0 = board_cycles();
+#endif
+
     databases_init();
+
+#ifdef FDB_BOARD_U545
+    cycles_mount = board_cycles() - t0;
+    t_kv = board_cycles();
+#endif
 
     /* High-water reached by database init, before the workload starts. */
     m.stack_init = stack_high_water_bytes();
 
     kvdb_phase(&m);
+
+#ifdef FDB_BOARD_U545
+    cycles_kv = board_cycles() - t_kv;
+    t_ts = board_cycles();
+#endif
+
     tsdb_phase(&m);
+
+#ifdef FDB_BOARD_U545
+    cycles_ts = board_cycles() - t_ts;
+
+    /* Real-board rollover phase: ring fill + wrap + recovery. */
+    t_roll = board_cycles();
+    ts_rollover_phase(&m);
+    cycles_roll = board_cycles() - t_roll;
+#endif
 
     /* Final scan after both phases have returned to this shallow frame.  The
      * scan sees the deepest frame of the whole run, including init. */
@@ -444,6 +675,29 @@ int main(void)
 #endif
 
     harness_print_result(&m);
+
+#ifdef FDB_BOARD_U545
+    /* Raw partition fingerprints: byte-level C/Rust image identity. */
+    m.kv_image_checksum = image_checksum(HW_KVDB_PART_OFFSET, HW_KVDB_PART_LEN);
+    m.ts_image_checksum = image_checksum(HW_TSDB_PART_OFFSET, HW_TSDB_PART_LEN);
+    harness_print_rollover(&m);
+
+    /* Cycle report consumed by harness/firmware/u545re/run_board.ps1. */
+    sh_write0("BOARD cycles_mount=");
+    sh_write_u32(cycles_mount);
+    sh_write0(" cycles_kv=");
+    sh_write_u32(cycles_kv);
+    sh_write0(" cycles_ts=");
+    sh_write_u32(cycles_ts);
+    sh_write0(" cycles_roll=");
+    sh_write_u32(cycles_roll);
+    sh_write0(" cycles_total=");
+    sh_write_u32(board_cycles());
+    sh_write0(" core_hz=");
+    sh_write_u32(board_core_hz());
+    sh_write0("\n");
+#endif
+
     harness_exit();
     return 0;
 }
