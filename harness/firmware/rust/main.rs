@@ -85,19 +85,104 @@ extern "C" {
 }
 
 /* ======================================================================== */
+/* Board (NUCLEO-U545RE-Q) output and cycle counters                         */
+/* ======================================================================== */
+
+#[cfg(feature = "board-u545")]
+mod board {
+    /// Result buffer read back by the debug probe after the run.
+    #[repr(C)]
+    pub struct BoardOut {
+        /// Set to `DONE` when the firmware has finished (host polls this).
+        pub done: u32,
+        /// Number of valid bytes in `buf` (including the NUL terminator).
+        pub len: u32,
+        pub buf: [u8; 4096],
+    }
+
+    pub const DONE: u32 = 0x454E4F44; // "DONE"
+
+    #[link_section = ".results"]
+    #[no_mangle]
+    pub static mut BOARD_OUT: BoardOut = BoardOut {
+        done: 0,
+        len: 0,
+        buf: [0; 4096],
+    };
+
+    /// Semihosting replacement used by the board build: SYS_WRITE0 appends the
+    /// NUL-terminated string to the RAM buffer, SYS_EXIT marks it complete and
+    /// spins so the probe can halt and read it.
+    pub fn semihost(op: u32, arg: usize) -> u32 {
+        unsafe {
+            let out = &raw mut BOARD_OUT;
+            match op {
+                0x04 => {
+                    let s = arg as *const u8;
+                    let mut i = 0usize;
+                    let mut n = (*out).len as usize;
+                    while i < 4096 {
+                        let b = core::ptr::read_volatile(s.add(i));
+                        if b == 0 || n >= 4096 {
+                            break;
+                        }
+                        core::ptr::write_volatile((*out).buf.as_mut_ptr().add(n), b);
+                        n += 1;
+                        i += 1;
+                    }
+                    (*out).len = n as u32;
+                }
+                0x18 => {
+                    (*out).done = DONE;
+                    loop {
+                        core::hint::spin_loop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        0
+    }
+
+    const DEMCR: *mut u32 = 0xE000_EDFC as *mut u32;
+    const DWT_CTRL: *mut u32 = 0xE000_1000 as *mut u32;
+    const DWT_CYCCNT: *mut u32 = 0xE000_1004 as *mut u32;
+
+    pub fn init_cycles() {
+        unsafe {
+            core::ptr::write_volatile(DEMCR, core::ptr::read_volatile(DEMCR) | (1 << 24));
+            core::ptr::write_volatile(DWT_CYCCNT, 0);
+            core::ptr::write_volatile(DWT_CTRL, core::ptr::read_volatile(DWT_CTRL) | 1);
+        }
+    }
+
+    #[inline(always)]
+    pub fn cycles() -> u32 {
+        unsafe { core::ptr::read_volatile(DWT_CYCCNT) }
+    }
+}
+
+/* ======================================================================== */
 /* Semihosting output (no libc, no core::fmt)                               */
 /* ======================================================================== */
 
 #[inline(always)]
 unsafe fn semihost(op: u32, arg: usize) -> u32 {
-    let mut r0 = op;
-    core::arch::asm!(
-        "bkpt 0xab",
-        inout("r0") r0,
-        in("r1") arg,
-        options(nostack, preserves_flags)
-    );
-    r0
+    #[cfg(feature = "board-u545")]
+    {
+        board::semihost(op, arg)
+    }
+    #[cfg(not(feature = "board-u545"))]
+    {
+        let mut r0 = op;
+        core::arch::asm!(
+            "bkpt 0xab",
+            inout("r0") r0,
+            in("r1") arg,
+            options(nostack, preserves_flags)
+        );
+        r0
+    }
 }
 
 fn write_bytes(s: &[u8]) {
@@ -1105,15 +1190,34 @@ pub extern "C" fn main() -> ! {
     fill_section_sizes(&mut m);
     m.stack_limit = stack_limit_bytes();
 
+    #[cfg(feature = "board-u545")]
+    board::init_cycles();
+    #[cfg(feature = "board-u545")]
+    let t0 = board::cycles();
+
     // Database init (compares with the C fdb_kvdb_init/fdb_tsdb_init phase).
     kv_mount();
     ts_mount();
+
+    #[cfg(feature = "board-u545")]
+    let cycles_mount = board::cycles().wrapping_sub(t0);
+    #[cfg(feature = "board-u545")]
+    let t_kv = board::cycles();
 
     // High-water reached by initialisation, before the workload starts.
     m.stack_init = stack_high_water_bytes();
 
     kv_phase(&mut m);
+
+    #[cfg(feature = "board-u545")]
+    let cycles_kv = board::cycles().wrapping_sub(t_kv);
+    #[cfg(feature = "board-u545")]
+    let t_ts = board::cycles();
+
     tsdb_phase(&mut m);
+
+    #[cfg(feature = "board-u545")]
+    let cycles_ts = board::cycles().wrapping_sub(t_ts);
 
     // Final scan after both phases have returned to this shallow frame.
     m.stack = stack_high_water_bytes();
@@ -1123,5 +1227,18 @@ pub extern "C" fn main() -> ! {
     stack_diagnostics(&mut m);
 
     print_result(&m);
+
+    #[cfg(feature = "board-u545")]
+    {
+        write_bytes(b"BOARD cycles_mount=\0");
+        write_u32(cycles_mount);
+        write_bytes(b" cycles_kv=\0");
+        write_u32(cycles_kv);
+        write_bytes(b" cycles_ts=\0");
+        write_u32(cycles_ts);
+        write_bytes(b" cycles_total=\0");
+        write_u32(board::cycles());
+        write_bytes(b" core_hz=16000000\n\0");
+    }
     exit()
 }

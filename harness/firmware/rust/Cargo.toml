@@ -16,6 +16,10 @@ name = "fw-rust"
 path = "main.rs"
 
 [features]
+# Real-hardware build: output goes to a RAM result buffer read back by the
+# debug probe (semihosting is not guaranteed on every probe), and DWT cycle
+# counters are reported. Used by harness/firmware/u545re/run_rust.sh.
+board-u545 = []
 # Include the per-phase stack-attribution instrumentation (see main.rs).
 # Off by default so the measured baseline image stays lean; scripts/fw_rust.sh
 # --phases builds with this feature for the attribution run.
