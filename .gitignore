@@ -5,3 +5,5 @@
 *.a
 reference/
 .DS_Store
+.work/
+.idea/
