@@ -113,6 +113,24 @@ fn decode_sector_header(buf: &[u8], lay: &KvLayout, wg: u32) -> RawSectorHeader 
     }
 }
 
+/// Out-of-line wrapper around [`Storage::write_status`].
+///
+/// `write_status` is small enough that the optimiser inlines it into every
+/// caller in this module (the status encoding plus the flash write is then
+/// duplicated ~11 times); keeping a single copy behind a call site is
+/// measurably smaller on the size profile, and status writes are not a
+/// per-byte hot loop. `write_status` is common to the KV and TS paths, so the
+/// wrapper lives here rather than in the storage layer.
+#[inline(never)]
+fn write_status<F: Flash>(
+    storage: &mut Storage<F>,
+    addr: u32,
+    status_num: usize,
+    status: usize,
+) -> Result<(), F::Error> {
+    storage.write_status(addr, status_num, status)
+}
+
 #[inline]
 fn read_raw_sector_header<F: Flash>(
     storage: &mut Storage<F>,
@@ -120,27 +138,32 @@ fn read_raw_sector_header<F: Flash>(
     lay: &KvLayout,
 ) -> Result<RawSectorHeader, F::Error> {
     let wg = F::WRITE_GRAN_BITS;
-    let raw = lay.sec_raw_size as usize;
-    if wg <= 8 {
+    // Every branch reads exactly `sec_raw_size` bytes into an array of that
+    // size, so no bounds-checked sub-slice of the buffer is needed.
+    if wg == 1 {
+        let mut b = [0u8; 16];
+        storage.read(addr, &mut b)?;
+        Ok(decode_sector_header(&b, lay, wg))
+    } else if wg <= 8 {
         let mut b = [0u8; 20];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_sector_header(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_sector_header(&b, lay, wg))
     } else if wg <= 32 {
         let mut b = [0u8; 36];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_sector_header(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_sector_header(&b, lay, wg))
     } else if wg <= 64 {
         let mut b = [0u8; 64];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_sector_header(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_sector_header(&b, lay, wg))
     } else if wg <= 128 {
         let mut b = [0u8; 112];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_sector_header(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_sector_header(&b, lay, wg))
     } else {
         let mut b = [0u8; 224];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_sector_header(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_sector_header(&b, lay, wg))
     }
 }
 
@@ -223,8 +246,18 @@ fn write_formatted_sector_header<F: Flash>(
         fill_sector_header(&mut b[..raw], lay, wg, combined, &mut scratch);
         storage.write(addr, &b[..raw])
     } else {
-        storage.write_status(addr + lay.sec_store_off, SEC_STATUS_NUM, store_status)?;
-        storage.write_status(addr + lay.sec_dirty_off, SEC_STATUS_NUM, dirty_status)?;
+        write_status(
+            storage,
+            addr + lay.sec_store_off,
+            SEC_STATUS_NUM,
+            store_status,
+        )?;
+        write_status(
+            storage,
+            addr + lay.sec_dirty_off,
+            SEC_STATUS_NUM,
+            dirty_status,
+        )?;
         write_sector_header_tail(storage, addr, lay, combined)
     }
 }
@@ -250,45 +283,72 @@ fn read_raw_kv_header<F: Flash>(
     lay: &KvLayout,
 ) -> Result<RawKvHeader, F::Error> {
     let wg = F::WRITE_GRAN_BITS;
-    let raw = lay.kv_raw_size as usize;
-    if wg <= 8 {
+    // As in `read_raw_sector_header`: read exactly `kv_raw_size` bytes into a
+    // buffer of that size so no bounds-checked sub-slice is needed.
+    if wg == 1 {
+        let mut b = [0u8; 24];
+        storage.read(addr, &mut b)?;
+        Ok(decode_kv_header_raw(&b, lay, wg))
+    } else if wg <= 8 {
         let mut b = [0u8; 28];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_kv_header_raw(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_kv_header_raw(&b, lay, wg))
     } else if wg <= 32 {
         let mut b = [0u8; 40];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_kv_header_raw(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_kv_header_raw(&b, lay, wg))
     } else if wg <= 64 {
         let mut b = [0u8; 64];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_kv_header_raw(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_kv_header_raw(&b, lay, wg))
     } else if wg <= 128 {
         let mut b = [0u8; 112];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_kv_header_raw(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_kv_header_raw(&b, lay, wg))
     } else {
         let mut b = [0u8; 196];
-        storage.read(addr, &mut b[..raw])?;
-        Ok(decode_kv_header_raw(&b[..raw], lay, wg))
+        storage.read(addr, &mut b)?;
+        Ok(decode_kv_header_raw(&b, lay, wg))
     }
 }
 
+/// Fill the KV header fields that follow the status table.
+///
+/// All supported layouts place `magic`, `len`, `crc`, `name_len` and
+/// `value_len` at the same offsets from the magic word; everything after the
+/// value length stays erased (`0xFF`), matching C's
+/// `memset(&kv_hdr, FDB_BYTE_ERASED, ...)`. `N` is the number of bytes between
+/// the magic word and the end of the raw header struct.
 #[inline]
-fn fill_kv_header_block(
-    buf: &mut [u8],
-    lay: &KvLayout,
+fn fill_kv_header_tail<const N: usize>(
+    b: &mut [u8; N],
     magic: u32,
     len: u32,
     crc: u32,
     name_len: u8,
     value_len: u32,
 ) {
-    put_u32(buf, lay.kv_magic_off as usize, magic);
-    put_u32(buf, lay.kv_len_off as usize, len);
-    put_u32(buf, lay.kv_crc_off as usize, crc);
-    buf[lay.kv_name_len_off as usize] = name_len;
-    put_u32(buf, lay.kv_value_len_off as usize, value_len);
+    let m = magic.to_le_bytes();
+    let l = len.to_le_bytes();
+    let c = crc.to_le_bytes();
+    let v = value_len.to_le_bytes();
+    b[0] = m[0];
+    b[1] = m[1];
+    b[2] = m[2];
+    b[3] = m[3];
+    b[4] = l[0];
+    b[5] = l[1];
+    b[6] = l[2];
+    b[7] = l[3];
+    b[8] = c[0];
+    b[9] = c[1];
+    b[10] = c[2];
+    b[11] = c[3];
+    b[12] = name_len;
+    b[16] = v[0];
+    b[17] = v[1];
+    b[18] = v[2];
+    b[19] = v[3];
 }
 
 /// Write a KV node header: status marker, then fields from `magic` onwards,
@@ -305,30 +365,25 @@ fn write_raw_kv_header<F: Flash>(
     name_len: u8,
     value_len: u32,
 ) -> Result<(), F::Error> {
-    storage.write_status(addr, KV_STATUS_NUM, status as usize)?;
+    write_status(storage, addr, KV_STATUS_NUM, status as usize)?;
     let wg = F::WRITE_GRAN_BITS;
-    let raw = lay.kv_raw_size as usize;
     let mo = lay.kv_magic_off as usize;
-    if wg <= 8 {
-        let mut b = [0xFFu8; 28];
-        fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
-        storage.write(addr + mo as u32, &b[mo..raw])
-    } else if wg <= 32 {
-        let mut b = [0xFFu8; 40];
-        fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
-        storage.write(addr + mo as u32, &b[mo..raw])
+    if wg <= 32 {
+        let mut b = [0xFFu8; 20];
+        fill_kv_header_tail(&mut b, magic, len, crc, name_len, value_len);
+        storage.write(addr + mo as u32, &b)
     } else if wg <= 64 {
-        let mut b = [0xFFu8; 64];
-        fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
-        storage.write(addr + mo as u32, &b[mo..raw])
+        let mut b = [0xFFu8; 24];
+        fill_kv_header_tail(&mut b, magic, len, crc, name_len, value_len);
+        storage.write(addr + mo as u32, &b)
     } else if wg <= 128 {
-        let mut b = [0xFFu8; 112];
-        fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
-        storage.write(addr + mo as u32, &b[mo..raw])
+        let mut b = [0xFFu8; 32];
+        fill_kv_header_tail(&mut b, magic, len, crc, name_len, value_len);
+        storage.write(addr + mo as u32, &b)
     } else {
-        let mut b = [0xFFu8; 196];
-        fill_kv_header_block(&mut b[..raw], lay, magic, len, crc, name_len, value_len);
-        storage.write(addr + mo as u32, &b[mo..raw])
+        let mut b = [0xFFu8; 36];
+        fill_kv_header_tail(&mut b, magic, len, crc, name_len, value_len);
+        storage.write(addr + mo as u32, &b)
     }
 }
 
@@ -379,6 +434,20 @@ impl KvEntry {
     /// Key as UTF-8, if it is valid UTF-8.
     pub fn name_str(&self) -> Option<&str> {
         core::str::from_utf8(self.name()).ok()
+    }
+
+    /// Internal view of the record as a decoded header (value-read path).
+    fn header(&self) -> KvHeader {
+        KvHeader {
+            addr: self.addr,
+            status: self.status,
+            crc: self.crc,
+            len: self.len,
+            value_len: self.value_len,
+            name_len: self.name_len,
+            valid: true,
+            erased: false,
+        }
     }
 }
 
@@ -434,6 +503,20 @@ struct KvHeader {
     erased: bool,
 }
 
+impl KvHeader {
+    /// Placeholder for caller-provided out-params (`read_kv_header_into`).
+    const EMPTY: Self = Self {
+        addr: FAILED_ADDR,
+        status: KvStatus::Unused,
+        crc: 0,
+        len: 0,
+        value_len: 0,
+        name_len: 0,
+        valid: false,
+        erased: false,
+    };
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CacheSlot {
     hash: u32,
@@ -487,15 +570,22 @@ pub type KvdbNoCache<F> = KvdbImpl<F, 0>;
 /// for tiny MCUs with a handful of hot keys.
 pub type KvdbSmallCache<F> = KvdbImpl<F, 16>;
 
+/// FNV-1a offset basis, shared by [`hash_key`] and the streamed name hasher.
+const FNV_OFFSET: u32 = 0x811C_9DC5;
+
 #[inline]
-fn hash_key(key: &[u8]) -> u32 {
+fn hash_bytes_into(mut hash: u32, bytes: &[u8]) -> u32 {
     // FNV-1a: cheap and good enough for a direct-mapped name cache.
-    let mut hash = 0x811C_9DC5u32;
-    for &b in key {
+    for &b in bytes {
         hash ^= b as u32;
         hash = hash.wrapping_mul(0x0100_0193);
     }
     hash
+}
+
+#[inline]
+fn hash_key(key: &[u8]) -> u32 {
+    hash_bytes_into(FNV_OFFSET, key)
 }
 
 #[inline]
@@ -610,7 +700,16 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             let p = slot.as_mut_ptr();
             core::ptr::addr_of_mut!((*p).storage).write(storage);
             core::ptr::addr_of_mut!((*p).cur_sec).write(SecInfo::UNKNOWN);
-            core::ptr::addr_of_mut!((*p).cache).write([CacheSlot::EMPTY; CACHE]);
+            // Initialize the cache in place.  `addr_of_mut!(...).write([EMPTY; CACHE])`
+            // would materialize the whole (512 B at CACHE = 64) array in a stack
+            // temporary first and then copy it into place; a slot-at-a-time store
+            // keeps the mount frame flat, which matters on a RAM-constrained MCU.
+            let cache = core::ptr::addr_of_mut!((*p).cache).cast::<CacheSlot>();
+            let mut i = 0;
+            while i < CACHE {
+                cache.add(i).write(CacheSlot::EMPTY);
+                i += 1;
+            }
             core::ptr::addr_of_mut!((*p).cache_lru).write(0);
             core::ptr::addr_of_mut!((*p).gc_request).write(false);
             core::ptr::addr_of_mut!((*p).in_recovery).write(false);
@@ -763,36 +862,47 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
     }
 
-    /// Decode a KV header at `addr`, flagging whether it is self-consistent.
-    fn read_kv_header(&mut self, addr: u32) -> Result<KvHeader, F::Error> {
+    /// Decode a KV header at `addr` into `hdr`, flagging whether it is
+    /// self-consistent.
+    ///
+    /// An out-param keeps the (small) header in the caller's frame instead of
+    /// materialising a `Result<KvHeader, _>` pair at every call site.
+    fn read_kv_header_into(&mut self, addr: u32, hdr: &mut KvHeader) -> Result<(), F::Error> {
         let lay = self.lay();
-        let raw = read_raw_kv_header(&mut self.storage, addr, &lay)?;
         let wg = self.wg();
+        let raw = read_raw_kv_header(&mut self.storage, addr, &lay)?;
         // Guard the length computation before trusting header fields: an
         // erased header (end of the record area) has value_len == 0xFFFF_FFFF.
+        // The arithmetic stays in u32: `sane` bounds every field, so the
+        // 64-bit sum C uses is not needed.
         let sane = raw.name_len as usize <= KV_NAME_MAX
             && raw.value_len <= self.storage.max_size()
             && raw.len != FAILED_ADDR
             && raw.len >= lay.kv_hdr_size
             && raw.len <= self.storage.max_size();
-        let expected_len = if sane {
-            lay.kv_hdr_size as u64
-                + wg_align(raw.name_len as usize, wg) as u64
-                + wg_align(raw.value_len as usize, wg) as u64
+        let name_part = wg_align(raw.name_len as usize, wg) as u32;
+        let value_part = wg_align(raw.value_len as usize, wg) as u32;
+        let valid = sane
+            && raw.magic == KV_MAGIC
+            && match (raw.len - lay.kv_hdr_size).checked_sub(name_part) {
+                Some(rest) => rest == value_part,
+                None => false,
+            };
+        hdr.addr = addr;
+        hdr.status = raw.status;
+        hdr.crc = raw.crc;
+        hdr.valid = valid;
+        hdr.erased = raw.erased;
+        if valid {
+            hdr.len = raw.len;
+            hdr.value_len = raw.value_len;
+            hdr.name_len = raw.name_len;
         } else {
-            u64::MAX
-        };
-        let valid = sane && raw.magic == KV_MAGIC && raw.len as u64 == expected_len;
-        Ok(KvHeader {
-            addr,
-            status: raw.status,
-            crc: raw.crc,
-            len: if valid { raw.len } else { lay.kv_hdr_size },
-            value_len: if valid { raw.value_len } else { 0 },
-            name_len: if valid { raw.name_len } else { 0 },
-            valid,
-            erased: raw.erased,
-        })
+            hdr.len = lay.kv_hdr_size;
+            hdr.value_len = 0;
+            hdr.name_len = 0;
+        }
+        Ok(())
     }
 
     /// Read the key name of a record (including write-granule padding) into
@@ -809,13 +919,6 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 .read(hdr.addr + lay.kv_hdr_size, &mut name[..aligned])?;
         }
         Ok(())
-    }
-
-    /// Read the key name of a record (including write-granule padding).
-    fn read_name(&mut self, hdr: &KvHeader) -> Result<[u8; KV_NAME_MAX], F::Error> {
-        let mut name = [0u8; KV_NAME_MAX];
-        self.read_name_into(hdr, &mut name)?;
-        Ok(name)
     }
 
     fn entry_from_header(&self, hdr: &KvHeader) -> KvEntry {
@@ -838,22 +941,33 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
 
     /// Find the next address that contains a KV magic word, like
     /// `find_next_kv_addr()` in C.
+    ///
+    /// Only reached for damaged records; kept out of line and free of
+    /// helper calls (the magic-word decode is written out as byte loads).
+    #[cold]
+    #[inline(never)]
     fn find_next_kv_addr(&mut self, start: u32, end: u32) -> Result<u32, F::Error> {
         let lay = self.lay();
         let mut buf = [0u8; 32];
         let mut addr = start;
         while addr < end && addr.saturating_add(32) < end {
             self.storage.read(addr, &mut buf)?;
-            for i in 0..(32 - 4) {
+            let mut i = 0usize;
+            while i < 32 - 4 {
                 if addr + i as u32 >= end {
                     break;
                 }
-                if get_u32(&buf, i) == KV_MAGIC {
+                let word = (buf[i] as u32)
+                    | ((buf[i + 1] as u32) << 8)
+                    | ((buf[i + 2] as u32) << 16)
+                    | ((buf[i + 3] as u32) << 24);
+                if word == KV_MAGIC {
                     let found = addr + i as u32 - lay.kv_magic_off;
                     if found >= start {
                         return Ok(found);
                     }
                 }
+                i += 1;
             }
             addr += 32 - 4;
         }
@@ -868,8 +982,10 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         const ERASED: u8 = 0xFF;
         let mut addr = start;
         let mut last_programmed: Option<u32> = None;
+        // One buffer for the whole scan: re-initialising it per 32-byte chunk
+        // would memset the same stack slot once per chunk.
+        let mut buf = [0u8; 32];
         while addr < end {
-            let mut buf = [0u8; 32];
             let n = core::cmp::min(32, (end - addr) as usize);
             self.storage.read(addr, &mut buf[..n])?;
             for (i, b) in buf[..n].iter().enumerate() {
@@ -894,17 +1010,17 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// `sec_end` is exclusive (`sector_addr + sector_size`). Callers only walk
     /// sectors whose store status is USING or FULL, so the empty-sector check
     /// C performs in `get_next_kv_addr()` is not needed here.
+    ///
+    /// Committed records are appended contiguously, so the next record starts
+    /// exactly after this one. FlashDB-C re-scans the following bytes for the
+    /// magic word on every step; we only do that when the header is damaged,
+    /// which keeps the damaged-flash scanner out of the hot walk.
+    #[inline]
     fn advance_kv(&mut self, sec_end: u32, hdr: &KvHeader) -> Result<u32, F::Error> {
-        let lay = self.lay();
         if hdr.addr > sec_end || hdr.len == 0 {
             return Ok(FAILED_ADDR);
         }
         if hdr.valid {
-            // Committed records are appended contiguously, so the next record
-            // starts exactly after this one. FlashDB-C re-scans the following
-            // bytes for the magic word on every step; we only do that when the
-            // header is damaged (see below), which removes one flash read per
-            // record from every traversal.
             let next = hdr.addr + hdr.len;
             return Ok(if next < sec_end { next } else { FAILED_ADDR });
         }
@@ -912,7 +1028,14 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             // Trailing erased area: no more records.
             return Ok(FAILED_ADDR);
         }
-        // Damaged record: fall back to scanning for the next magic word.
+        self.advance_kv_damaged(sec_end, hdr)
+    }
+
+    /// Damaged-record fallback: scan forward for the next KV magic word.
+    #[cold]
+    #[inline(never)]
+    fn advance_kv_damaged(&mut self, sec_end: u32, hdr: &KvHeader) -> Result<u32, F::Error> {
+        let lay = self.lay();
         let start = hdr.addr + wg_align(1, self.wg()) as u32;
         let end = sec_end - lay.sec_hdr_size;
         let addr = self.find_next_kv_addr(start, end)?;
@@ -923,40 +1046,49 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
     }
 
-    fn read_sector_info(&mut self, addr: u32, traversal: bool) -> Result<SecInfo, F::Error> {
+    /// Read and decode a sector header into `sec` (no record traversal).
+    ///
+    /// The traversal half lives in [`KvdbImpl::read_sector_traversal`]: it is
+    /// only needed when the caller has to know the sector's free space, but it
+    /// is by far the larger piece, so keeping it out of this function keeps the
+    /// frame of every plain sector scan small.
+    fn read_sector_info_into(&mut self, addr: u32, sec: &mut SecInfo) -> Result<(), F::Error> {
         debug_assert!(self.storage.is_sector_aligned(addr));
         let lay = self.lay();
         let raw = read_raw_sector_header(&mut self.storage, addr, &lay)?;
-        let mut sec = SecInfo {
-            addr,
-            check_ok: raw.magic == KVDB_SECTOR_MAGIC
-                && (raw.combined == SECTOR_NOT_COMBINED || raw.combined == SECTOR_COMBINED),
-            store: raw.store,
-            dirty: raw.dirty,
-            combined: raw.combined,
-            remain: 0,
-            empty_kv: FAILED_ADDR,
-        };
-        if !sec.check_ok {
+        sec.addr = addr;
+        sec.check_ok = raw.magic == KVDB_SECTOR_MAGIC
+            && (raw.combined == SECTOR_NOT_COMBINED || raw.combined == SECTOR_COMBINED);
+        if sec.check_ok {
+            sec.store = raw.store;
+            sec.dirty = raw.dirty;
+            sec.combined = raw.combined;
+        } else {
             sec.store = SectorStoreStatus::Unused;
             sec.dirty = SectorDirtyStatus::Unused;
             sec.combined = SECTOR_NOT_COMBINED;
-            return Ok(sec);
         }
-        if !traversal {
-            return Ok(sec);
-        }
+        sec.remain = 0;
+        sec.empty_kv = FAILED_ADDR;
+        Ok(())
+    }
+
+    /// Fill in the free space of a sector whose header `sec` was decoded by
+    /// [`KvdbImpl::read_sector_info_into`] (FlashDB's `traversal` mode).
+    fn read_sector_traversal(&mut self, sec: &mut SecInfo) -> Result<(), F::Error> {
+        let lay = self.lay();
         let sec_size = self.storage.sec_size();
         let hdr_size = lay.sec_hdr_size;
         sec.remain = sec_size - hdr_size;
-        sec.empty_kv = addr + hdr_size;
+        sec.empty_kv = sec.addr + hdr_size;
         if sec.store == SectorStoreStatus::Empty {
-            return Ok(sec);
+            return Ok(());
         }
         if sec.store == SectorStoreStatus::Using {
-            let mut kv_addr = addr + hdr_size;
+            let mut kv_addr = sec.addr + hdr_size;
+            let mut hdr = KvHeader::EMPTY;
             loop {
-                let hdr = self.read_kv_header(kv_addr)?;
+                self.read_kv_header_into(kv_addr, &mut hdr)?;
                 if !hdr.valid && hdr.status != KvStatus::PreWrite && hdr.status != KvStatus::ErrHdr
                 {
                     if hdr.erased {
@@ -964,7 +1096,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                         // sector's empty_kv/remain up to date, i.e. the free
                         // space after the last valid record. Reporting 0 here
                         // would make alloc/GC stop decisions disagree with C.
-                        sec.remain = sec_size - (sec.empty_kv - addr);
+                        sec.remain = sec_size - (sec.empty_kv - sec.addr);
                     } else {
                         sec.remain = 0;
                     }
@@ -978,13 +1110,13 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 }
                 kv_addr = next;
             }
-            let ff = self.continue_ff_addr(sec.empty_kv, addr + sec_size)?;
+            let ff = self.continue_ff_addr(sec.empty_kv, sec.addr + sec_size)?;
             if sec.empty_kv != ff {
                 sec.empty_kv = ff;
-                sec.remain = sec_size - (ff - addr);
+                sec.remain = sec_size - (ff - sec.addr);
             }
         }
-        Ok(sec)
+        Ok(())
     }
 
     /// Next sector address in ring order, honouring the `combined` field.
@@ -1044,8 +1176,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// `cur_sec`. Returns `FAILED_ADDR` when there is no space (and may set the
     /// GC request flag).
     fn alloc_kv(&mut self, kv_size: u32) -> Result<u32, F::Error> {
-        let lay = self.lay();
-        let threshold = lay.sec_remain_threshold;
+        let threshold = self.lay().sec_remain_threshold;
         // Fast path: the sector we are already appending to.
         if self.cur_sec.check_ok
             && self.cur_sec.store == SectorStoreStatus::Using
@@ -1055,50 +1186,50 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         {
             return Ok(self.cur_sec.empty_kv);
         }
-        let (_, _, candidate) = self.alloc_scan(kv_size)?;
-        match candidate {
-            Some(sec) => {
-                self.cur_sec = sec;
-                Ok(sec.empty_kv)
-            }
-            None => Ok(FAILED_ADDR),
+        let mut sec = SecInfo::UNKNOWN;
+        if self.alloc_scan(kv_size, &mut sec)? {
+            self.cur_sec = sec;
+            Ok(sec.empty_kv)
+        } else {
+            Ok(FAILED_ADDR)
         }
     }
 
-    /// One pass over the sector ring that computes the EMPTY/USING counts and
-    /// locates the first allocation candidate (preferring USING sectors), so
+    /// One pass over the sector ring that locates the first allocation
+    /// candidate (preferring USING sectors) and writes it to `out`, so
     /// `alloc_kv` does not need a separate statistics scan.
-    fn alloc_scan(&mut self, kv_size: u32) -> Result<(u32, u32, Option<SecInfo>), F::Error> {
-        let lay = self.lay();
-        let threshold = lay.sec_remain_threshold;
+    ///
+    /// Returns whether a candidate was found. The pass stops as soon as one is
+    /// found: the per-sector walk has no side effects, so the remaining
+    /// sectors cannot change the result.
+    fn alloc_scan(&mut self, kv_size: u32, out: &mut SecInfo) -> Result<bool, F::Error> {
+        let threshold = self.lay().sec_remain_threshold;
         let sec_size = self.storage.sec_size();
         let mut empty = 0u32;
-        let mut using = 0u32;
-        let mut first_empty: Option<u32> = None;
-        let mut using_cand: Option<SecInfo> = None;
+        let mut first_empty = FAILED_ADDR;
+        let mut found = false;
+        let mut sec = SecInfo::UNKNOWN;
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
             traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
+            self.read_sector_info_into(addr, &mut sec)?;
             if sec.check_ok {
                 match sec.store {
                     SectorStoreStatus::Empty => {
                         empty += 1;
-                        if first_empty.is_none() {
-                            first_empty = Some(sec.addr);
+                        if first_empty == FAILED_ADDR {
+                            first_empty = sec.addr;
                         }
                     }
                     SectorStoreStatus::Using => {
-                        using += 1;
-                        if using_cand.is_none() {
-                            let t = self.read_sector_info(addr, true)?;
-                            if t.remain > kv_size + threshold
-                                && (t.dirty == SectorDirtyStatus::False
-                                    || (t.dirty == SectorDirtyStatus::True && !self.gc_request))
-                            {
-                                using_cand = Some(t);
-                            }
+                        *out = sec;
+                        self.read_sector_traversal(out)?;
+                        found = out.remain > kv_size + threshold
+                            && (out.dirty == SectorDirtyStatus::False
+                                || (out.dirty == SectorDirtyStatus::True && !self.gc_request));
+                        if found {
+                            break;
                         }
                     }
                     _ => {}
@@ -1109,63 +1240,56 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 break;
             }
         }
-        let candidate = match using_cand {
-            Some(sec) => Some(sec),
-            None => match first_empty {
-                Some(empty_addr) if empty > GC_EMPTY_SEC_THRESHOLD || self.gc_request => {
-                    let t = self.read_sector_info(empty_addr, true)?;
-                    if t.remain > kv_size + threshold {
-                        Some(t)
-                    } else {
-                        None
-                    }
-                }
-                Some(_) => {
-                    self.gc_request = true;
-                    None
-                }
-                None => None,
-            },
-        };
-        Ok((empty, using, candidate))
+        if !found && first_empty != FAILED_ADDR {
+            if empty > GC_EMPTY_SEC_THRESHOLD || self.gc_request {
+                self.read_sector_info_into(first_empty, out)?;
+                self.read_sector_traversal(out)?;
+                found = out.remain > kv_size + threshold;
+            } else {
+                self.gc_request = true;
+            }
+        }
+        Ok(found)
     }
 
-    fn sector_statistics(&mut self) -> Result<(u32, u32, u32), F::Error> {
+    /// Count the EMPTY sectors and remember the last one in scan order (C's
+    /// `gc_check_cb`), using one ring pass.
+    fn sector_statistics(&mut self) -> Result<(u32, u32), F::Error> {
         let sec_size = self.storage.sec_size();
         let mut empty = 0u32;
-        let mut using = 0u32;
         let mut last_empty = 0u32;
+        let mut sec = SecInfo::UNKNOWN;
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
             traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
-            if sec.check_ok {
-                match sec.store {
-                    SectorStoreStatus::Empty => {
-                        empty += 1;
-                        last_empty = sec.addr;
-                    }
-                    SectorStoreStatus::Using => using += 1,
-                    _ => {}
-                }
+            self.read_sector_info_into(addr, &mut sec)?;
+            if sec.check_ok && sec.store == SectorStoreStatus::Empty {
+                empty += 1;
+                last_empty = sec.addr;
             }
             addr = self.next_sector_addr(&sec, traversed);
             if addr == FAILED_ADDR {
                 break;
             }
         }
-        Ok((empty, using, last_empty))
+        Ok((empty, last_empty))
     }
 
-    /// Move a sector's store status forward; returns whether the sector became
-    /// full because of this record (`update_sec_status()` in C).
-    fn update_sec_status(&mut self, sec: &mut SecInfo, new_kv_len: u32) -> Result<bool, F::Error> {
+    /// Move the current sector's store status forward; returns whether the
+    /// sector became full because of this record (`update_sec_status()` in C).
+    ///
+    /// It works on `self.cur_sec` directly (split borrow) instead of taking a
+    /// `&mut SecInfo` copy of it.
+    fn update_sec_status(&mut self, new_kv_len: u32) -> Result<bool, F::Error> {
         let lay = self.lay();
+        let storage = &mut self.storage;
+        let sec = &mut self.cur_sec;
         let mut is_full = false;
         match sec.store {
             SectorStoreStatus::Empty => {
-                self.storage.write_status(
+                write_status(
+                    storage,
                     sec.addr + lay.sec_store_off,
                     SEC_STATUS_NUM,
                     SectorStoreStatus::Using as usize,
@@ -1176,7 +1300,8 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 if sec.remain < lay.sec_remain_threshold
                     || sec.remain < new_kv_len + lay.sec_remain_threshold
                 {
-                    self.storage.write_status(
+                    write_status(
+                        storage,
                         sec.addr + lay.sec_store_off,
                         SEC_STATUS_NUM,
                         SectorStoreStatus::Full as usize,
@@ -1191,7 +1316,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     }
 
     /// Write a record at `cur_sec.empty_kv` (`create_kv_blob()` in C).
-    fn create_kv_blob(&mut self, key: &[u8], value: &[u8]) -> Result<(), F::Error> {
+    fn create_kv_blob(&mut self, key: &[u8], value: &[u8], hash: u32) -> Result<(), F::Error> {
         let lay = self.lay();
         let wg = self.wg();
         let addr = self.cur_sec.empty_kv;
@@ -1203,9 +1328,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         let value_len = value.len() as u32;
 
         // Mark the sector as using/full before the record is written.
-        let mut sec = self.cur_sec;
-        let is_full = self.update_sec_status(&mut sec, len)?;
-        self.cur_sec = sec;
+        let is_full = self.update_sec_status(len)?;
 
         // CRC32 over name_len (+ struct padding), value_len, name (+padding),
         // value (+padding).
@@ -1232,65 +1355,81 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             addr + lay.kv_hdr_size + wg_align(key.len(), wg) as u32,
             value,
         )?;
-        self.storage
-            .write_status(addr, KV_STATUS_NUM, KvStatus::Write as usize)?;
+        write_status(
+            &mut self.storage,
+            addr,
+            KV_STATUS_NUM,
+            KvStatus::Write as usize,
+        )?;
 
         self.cur_sec.empty_kv = addr + len;
         self.cur_sec.remain = self.cur_sec.remain.saturating_sub(len);
         if is_full {
             self.gc_request = true;
         }
-        self.cache_insert(hash_key(key), addr);
+        self.cache_insert(hash, addr);
         Ok(())
     }
 
     /// Delete (or pre-delete) a record and mark the sector dirty.
+    ///
+    /// `hash` is the name-cache hash of the record's key (when known), used to
+    /// drop the cache entry; passing it keeps the caller from having to keep
+    /// the key bytes alive.
     fn del_kv_addr(
         &mut self,
         addr: u32,
-        key: Option<&[u8]>,
+        hash: Option<u32>,
         complete: bool,
     ) -> Result<(), F::Error> {
-        let lay = self.lay();
         let status = if complete {
             KvStatus::Deleted
         } else {
             KvStatus::PreDelete
         };
-        self.storage
-            .write_status(addr, KV_STATUS_NUM, status as usize)?;
+        write_status(&mut self.storage, addr, KV_STATUS_NUM, status as usize)?;
         if complete {
             if !self.last_is_complete_del {
-                if let Some(key) = key {
-                    self.cache_invalidate(hash_key(key));
+                if let Some(hash) = hash {
+                    self.cache_invalidate(hash);
                 }
             }
             self.last_is_complete_del = false;
         } else {
             self.last_is_complete_del = true;
         }
-        // Mark the sector dirty (only the first deletion costs a write).
+        // Mark the sector dirty (only the first deletion in a sector costs a
+        // write, so the whole check is a cold path).
         let sec_size = self.storage.sec_size();
         let sec_addr = addr - addr % sec_size;
-        // Fast path: we already know the currently active sector is dirty.
-        let dirty = if self.cur_sec.addr == sec_addr
+        if self.cur_sec.addr == sec_addr
             && self.cur_sec.check_ok
             && self.cur_sec.dirty == SectorDirtyStatus::True
         {
-            SectorDirtyStatus::True as usize
-        } else {
-            self.storage
-                .read_status(sec_addr + lay.sec_dirty_off, SEC_STATUS_NUM)?
-        };
-        if dirty == SectorDirtyStatus::False as usize {
-            self.storage.write_status(
-                sec_addr + lay.sec_dirty_off,
-                SEC_STATUS_NUM,
-                SectorDirtyStatus::True as usize,
-            )?;
-            if self.cur_sec.addr == sec_addr {
-                self.cur_sec.dirty = SectorDirtyStatus::True;
-            }
+            return Ok(());
+        }
+        self.mark_sector_dirty(sec_addr)
+    }
+
+    /// First deletion in a sector: flag it dirty (`mark_sector_dirty` in C).
+    #[cold]
+    #[inline(never)]
+    fn mark_sector_dirty(&mut self, sec_addr: u32) -> Result<(), F::Error> {
+        let lay = self.lay();
+        let dirty = self
+            .storage
+            .read_status(sec_addr + lay.sec_dirty_off, SEC_STATUS_NUM)?;
+        if dirty != SectorDirtyStatus::False as usize {
+            return Ok(());
+        }
+        write_status(
+            &mut self.storage,
+            sec_addr + lay.sec_dirty_off,
+            SEC_STATUS_NUM,
+            SectorDirtyStatus::True as usize,
+        )?;
+        if self.cur_sec.addr == sec_addr {
+            self.cur_sec.dirty = SectorDirtyStatus::True;
         }
         Ok(())
     }
@@ -1302,54 +1441,96 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// This reads only the record header and key name. Use
     /// [`KvdbImpl::read_value`] to read the value (which verifies its CRC32).
     pub fn find(&mut self, key: &[u8]) -> Result<Option<KvEntry>, F::Error> {
-        if key.len() > KV_NAME_MAX {
+        let mut hdr = KvHeader::EMPTY;
+        if !self.find_header_into(key, &mut hdr)? {
             return Ok(None);
+        }
+        let mut entry = self.entry_from_header(&hdr);
+        self.read_name_into(&hdr, &mut entry.name)?;
+        Ok(Some(entry))
+    }
+
+    /// Look up a record header by key (cache first, then a full scan).
+    ///
+    /// On a hit `out` holds the decoded header; the value CRC is *not*
+    /// verified. This is the internal form used by `get`/`set`/`remove`: they
+    /// only need the small header, not the 64-byte name copy embedded in
+    /// [`KvEntry`].
+    fn find_header_into(&mut self, key: &[u8], out: &mut KvHeader) -> Result<bool, F::Error> {
+        if key.len() > KV_NAME_MAX {
+            return Ok(false);
         }
         let hash = hash_key(key);
         if let Some(addr) = self.cache_lookup(hash) {
-            let hdr = self.read_kv_header(addr)?;
-            if hdr.valid && hdr.status == KvStatus::Write && hdr.name_len as usize == key.len() {
-                let mut entry = self.entry_from_header(&hdr);
-                self.read_name_into(&hdr, &mut entry.name)?;
-                if &entry.name[..key.len()] == key {
-                    return Ok(Some(entry));
-                }
+            self.read_kv_header_into(addr, out)?;
+            if out.valid
+                && out.status == KvStatus::Write
+                && out.name_len as usize == key.len()
+                && self.name_matches(out, key)?
+            {
+                return Ok(true);
             }
             // Stale cache entry: drop it and scan.
             self.cache_invalidate(hash);
         }
-        let found = self.find_scan(key)?;
-        if let Some(entry) = found.as_ref() {
-            self.cache_insert(hash, entry.addr);
+        if self.find_scan_header_into(key, out)? {
+            self.cache_insert(hash, out.addr);
+            return Ok(true);
         }
-        Ok(found)
+        Ok(false)
     }
 
-    fn find_scan(&mut self, key: &[u8]) -> Result<Option<KvEntry>, F::Error> {
+    /// Find the address of a committed record, or `FAILED_ADDR` when absent.
+    fn find_addr(&mut self, key: &[u8]) -> Result<u32, F::Error> {
+        let mut hdr = KvHeader::EMPTY;
+        Ok(if self.find_header_into(key, &mut hdr)? {
+            hdr.addr
+        } else {
+            FAILED_ADDR
+        })
+    }
+
+    /// Compare the key name stored at `hdr` with `key`, in small chunks so no
+    /// 64-byte name buffer is needed on the lookup path.
+    fn name_matches(&mut self, hdr: &KvHeader, key: &[u8]) -> Result<bool, F::Error> {
+        let lay = self.lay();
+        let mut buf = [0u8; 32];
+        let mut off = 0usize;
+        while off < key.len() {
+            let n = core::cmp::min(32, key.len() - off);
+            self.storage
+                .read(hdr.addr + lay.kv_hdr_size + off as u32, &mut buf[..n])?;
+            if buf[..n] != key[off..off + n] {
+                return Ok(false);
+            }
+            off += n;
+        }
+        Ok(true)
+    }
+
+    fn find_scan_header_into(&mut self, key: &[u8], out: &mut KvHeader) -> Result<bool, F::Error> {
         let lay = self.lay();
         let sec_size = self.storage.sec_size();
+        let mut sec = SecInfo::UNKNOWN;
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
             traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
+            self.read_sector_info_into(addr, &mut sec)?;
             if sec.check_ok
                 && (sec.store == SectorStoreStatus::Using || sec.store == SectorStoreStatus::Full)
             {
                 let mut kv_addr = sec.addr + lay.sec_hdr_size;
                 loop {
-                    let hdr = self.read_kv_header(kv_addr)?;
-                    if hdr.valid
-                        && hdr.status == KvStatus::Write
-                        && hdr.name_len as usize == key.len()
+                    self.read_kv_header_into(kv_addr, out)?;
+                    if out.valid
+                        && out.status == KvStatus::Write
+                        && out.name_len as usize == key.len()
+                        && self.name_matches(out, key)?
                     {
-                        let mut entry = self.entry_from_header(&hdr);
-                        self.read_name_into(&hdr, &mut entry.name)?;
-                        if &entry.name[..key.len()] == key {
-                            return Ok(Some(entry));
-                        }
+                        return Ok(true);
                     }
-                    let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
+                    let next = self.advance_kv(sec.addr + sec_size, out)?;
                     if next == FAILED_ADDR {
                         break;
                     }
@@ -1361,37 +1542,40 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 break;
             }
         }
-        Ok(None)
+        Ok(false)
     }
 
     /// Verify a record's CRC and copy up to `buf.len()` value bytes.
     fn read_value_verified(
         &mut self,
-        entry: &KvEntry,
+        hdr: &KvHeader,
         expected_key: Option<&[u8]>,
         buf: &mut [u8],
     ) -> Result<usize, F::Error> {
         let lay = self.lay();
         let wg = self.wg();
-        let name_len = entry.name_len as usize;
-        let value_len = entry.value_len as usize;
+        let name_len = hdr.name_len as usize;
+        let value_len = hdr.value_len as usize;
         let aligned_name = wg_align(name_len, wg);
         let aligned_value = wg_align(value_len, wg);
+        let name_addr = hdr.addr + lay.kv_hdr_size;
+        let value_addr = name_addr + aligned_name as u32;
 
-        let mut crc = crc_name_len(0, entry.name_len);
-        crc = crc32_u32(crc, entry.value_len);
+        let mut crc = crc_name_len(0, hdr.name_len);
+        crc = crc32_u32(crc, hdr.value_len);
 
-        let mut name_buf = [0u8; KV_NAME_MAX];
-        self.storage
-            .read(entry.addr + lay.kv_hdr_size, &mut name_buf[..aligned_name])?;
-        crc = crc32(crc, &name_buf[..aligned_name]);
+        // One scratch buffer: the name first, then (re-used) the value
+        // padding. A 64-byte single-read variant measured 92 B smaller than a
+        // chunked 32-byte one, so ROM wins over the extra stack slot here.
+        let mut scratch = [0u8; KV_NAME_MAX];
+        self.storage.read(name_addr, &mut scratch[..aligned_name])?;
+        crc = crc32(crc, &scratch[..aligned_name]);
         if let Some(key) = expected_key {
-            if &name_buf[..name_len] != key {
+            if &scratch[..name_len] != key {
                 return Err(Error::ReadCorrupted);
             }
         }
 
-        let value_addr = entry.value_addr;
         let copy_len = core::cmp::min(buf.len(), value_len);
         if buf.len() >= value_len {
             // Single flash read of the whole value, CRC computed in place.
@@ -1400,31 +1584,55 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 crc = crc32(crc, &buf[..value_len]);
             }
         } else {
-            let mut tmp = [0u8; 32];
-            let mut off = 0usize;
-            while off < value_len {
-                let chunk = core::cmp::min(32, value_len - off);
-                self.storage
-                    .read(value_addr + off as u32, &mut tmp[..chunk])?;
-                crc = crc32(crc, &tmp[..chunk]);
-                if off < copy_len {
-                    let n = core::cmp::min(copy_len - off, chunk);
-                    buf[off..off + n].copy_from_slice(&tmp[..n]);
-                }
-                off += chunk;
-            }
+            crc = self.read_value_truncated(value_addr, value_len, copy_len, buf, crc)?;
         }
         if aligned_value > value_len {
+            // Re-use the name scratch for the value padding (always smaller
+            // than one write granule, so this loop normally runs once).
+            let mut pad_off = 0usize;
             let padding = aligned_value - value_len;
-            let mut pad = [0u8; 32];
-            self.storage
-                .read(value_addr + value_len as u32, &mut pad[..padding])?;
-            crc = crc32(crc, &pad[..padding]);
+            while pad_off < padding {
+                let n = core::cmp::min(KV_NAME_MAX, padding - pad_off);
+                self.storage.read(
+                    value_addr + value_len as u32 + pad_off as u32,
+                    &mut scratch[..n],
+                )?;
+                crc = crc32(crc, &scratch[..n]);
+                pad_off += n;
+            }
         }
-        if crc != entry.crc {
+        if crc != hdr.crc {
             return Err(Error::ReadCorrupted);
         }
         Ok(copy_len)
+    }
+
+    /// Cold half of [`KvdbImpl::read_value_verified`]: the caller's buffer is
+    /// smaller than the value, so read in chunks and copy the prefix.
+    #[cold]
+    #[inline(never)]
+    fn read_value_truncated(
+        &mut self,
+        value_addr: u32,
+        value_len: usize,
+        copy_len: usize,
+        buf: &mut [u8],
+        mut crc: u32,
+    ) -> Result<u32, F::Error> {
+        let mut tmp = [0u8; 32];
+        let mut off = 0usize;
+        while off < value_len {
+            let chunk = core::cmp::min(32, value_len - off);
+            self.storage
+                .read(value_addr + off as u32, &mut tmp[..chunk])?;
+            crc = crc32(crc, &tmp[..chunk]);
+            if off < copy_len {
+                let n = core::cmp::min(copy_len - off, chunk);
+                buf[off..off + n].copy_from_slice(&tmp[..n]);
+            }
+            off += chunk;
+        }
+        Ok(crc)
     }
 
     /// Get a value into `buf`; returns the number of bytes copied.
@@ -1433,10 +1641,11 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// value, the value is truncated (use [`KvdbImpl::find`] for its length).
     /// The value's CRC32 is always verified before any byte is returned.
     pub fn get(&mut self, key: &[u8], buf: &mut [u8]) -> Result<Option<usize>, F::Error> {
-        let Some(entry) = self.find(key)? else {
+        let mut hdr = KvHeader::EMPTY;
+        if !self.find_header_into(key, &mut hdr)? {
             return Ok(None);
-        };
-        let n = self.read_value_verified(&entry, Some(key), buf)?;
+        }
+        let n = self.read_value_verified(&hdr, Some(key), buf)?;
         Ok(Some(n))
     }
 
@@ -1455,7 +1664,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
 
     /// Copy the value of a record obtained from [`KvdbImpl::find`].
     pub fn read_value(&mut self, entry: &KvEntry, buf: &mut [u8]) -> Result<usize, F::Error> {
-        self.read_value_verified(entry, None, buf)
+        self.read_value_verified(&entry.header(), None, buf)
     }
 
     // -- mutation -----------------------------------------------------------
@@ -1471,6 +1680,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         if len > self.storage.sec_size() - lay.sec_hdr_size {
             return Err(Error::SavedFull);
         }
+        let hash = hash_key(key);
 
         // 1. Make sure the new record fits before touching the old one.
         let mut addr = self.alloc_kv(len)?;
@@ -1483,20 +1693,19 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             return Err(Error::SavedFull);
         }
 
-        // 2. Find the old record (if any) and mark it pre-deleted.
-        let old = self.find(key)?;
-        if let Some(old) = old.as_ref() {
-            self.del_kv_addr(old.addr, Some(key), false)?;
+        // 2. Find the old record (if any) and mark it pre-deleted. Only its
+        //    address is needed, so the lookup must not build a full `KvEntry`.
+        let old_addr = self.find_addr(key)?;
+        if old_addr != FAILED_ADDR {
+            self.del_kv_addr(old_addr, Some(hash), false)?;
         }
 
         // 3. Write the new record.
-        let result = self.create_kv_blob(key, value);
+        let result = self.create_kv_blob(key, value, hash);
 
         // 4. Finalise deletion of the old record once the new one is committed.
-        if let Some(old) = old.as_ref() {
-            if result.is_ok() {
-                self.del_kv_addr(old.addr, Some(key), true)?;
-            }
+        if old_addr != FAILED_ADDR && result.is_ok() {
+            self.del_kv_addr(old_addr, Some(hash), true)?;
         }
         result?;
 
@@ -1513,10 +1722,11 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
 
     /// Delete a key; returns whether the key existed.
     pub fn remove(&mut self, key: &[u8]) -> Result<bool, F::Error> {
-        let Some(entry) = self.find(key)? else {
+        let addr = self.find_addr(key)?;
+        if addr == FAILED_ADDR {
             return Ok(false);
-        };
-        self.del_kv_addr(entry.addr, Some(key), true)?;
+        }
+        self.del_kv_addr(addr, Some(hash_key(key)), true)?;
         Ok(true)
     }
 
@@ -1532,19 +1742,21 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         last_gc_remain: &mut Option<u32>,
     ) -> Result<bool, F::Error> {
         let lay = self.lay();
-        self.storage.write_status(
+        let sec_size = self.storage.sec_size();
+        write_status(
+            &mut self.storage,
             sec.addr + lay.sec_dirty_off,
             SEC_STATUS_NUM,
             SectorDirtyStatus::Gc as usize,
         )?;
         let mut kv_addr = sec.addr + lay.sec_hdr_size;
+        let mut hdr = KvHeader::EMPTY;
         loop {
-            let hdr = self.read_kv_header(kv_addr)?;
+            self.read_kv_header_into(kv_addr, &mut hdr)?;
             if hdr.valid && (hdr.status == KvStatus::Write || hdr.status == KvStatus::PreDelete) {
-                let name = self.read_name(&hdr)?;
-                self.move_kv(&hdr, &name[..hdr.name_len as usize])?;
+                self.move_kv(&hdr)?;
             }
-            let next = self.advance_kv(sec.addr + self.storage.sec_size(), &hdr)?;
+            let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
             if next == FAILED_ADDR {
                 break;
             }
@@ -1560,8 +1772,10 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 // First collected sector in this GC pass: C reads the sector at
                 // `last_gc_addr` (initially the last EMPTY sector) to decide
                 // whether to stop.
-                let last = self.read_sector_info(previous, true)?;
+                let mut last = SecInfo::UNKNOWN;
+                self.read_sector_info_into(previous, &mut last)?;
                 if last.check_ok {
+                    self.read_sector_traversal(&mut last)?;
                     last.remain
                 } else {
                     0
@@ -1569,34 +1783,51 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             }
         };
         // A freshly formatted sector always has (sec_size - header) free bytes.
-        *last_gc_remain = Some(self.storage.sec_size() - lay.sec_hdr_size);
+        *last_gc_remain = Some(sec_size - lay.sec_hdr_size);
         Ok(previous_remain > free_size)
     }
 
-    /// Move one live record to a new location (used by GC and recovery).
-    fn move_kv(&mut self, hdr: &KvHeader, name: &[u8]) -> Result<(), F::Error> {
+    /// FNV-1a hash of a record's key name, streamed from flash so the GC path
+    /// never materialises a 64-byte name buffer.
+    fn hash_name(&mut self, hdr: &KvHeader) -> Result<u32, F::Error> {
         let lay = self.lay();
+        let name_len = hdr.name_len as usize;
+        let mut hash = FNV_OFFSET;
+        let mut buf = [0u8; 16];
+        let mut off = 0usize;
+        while off < name_len {
+            let n = core::cmp::min(16, name_len - off);
+            self.storage
+                .read(hdr.addr + lay.kv_hdr_size + off as u32, &mut buf[..n])?;
+            hash = hash_bytes_into(hash, &buf[..n]);
+            off += n;
+        }
+        Ok(hash)
+    }
+
+    /// Move one live record to a new location (used by GC and recovery).
+    fn move_kv(&mut self, hdr: &KvHeader) -> Result<(), F::Error> {
+        let lay = self.lay();
+        let hash = self.hash_name(hdr)?;
         if hdr.status == KvStatus::Write {
-            self.del_kv_addr(hdr.addr, Some(name), false)?;
+            self.del_kv_addr(hdr.addr, Some(hash), false)?;
         }
         let new_addr = self.alloc_kv(hdr.len)?;
         if new_addr == FAILED_ADDR {
             return Err(Error::SavedFull);
         }
-        // During recovery a PRE_DELETE record may already have been recreated.
-        if self.in_recovery && hdr.status == KvStatus::PreDelete {
-            if let Some(existing) = self.find_scan(name)? {
-                if existing.addr != hdr.addr {
-                    self.del_kv_addr(hdr.addr, Some(name), true)?;
-                    return Ok(());
-                }
-            }
+        // During recovery a PRE_DELETE record may already have been recreated
+        // (recovery-only, hence the cold out-of-line helper).
+        if self.in_recovery && hdr.status == KvStatus::PreDelete && self.recovery_dup_check(hdr)? {
+            return Ok(());
         }
-        let mut sec = self.cur_sec;
-        self.update_sec_status(&mut sec, hdr.len)?;
-        self.cur_sec = sec;
-        self.storage
-            .write_status(new_addr, KV_STATUS_NUM, KvStatus::PreWrite as usize)?;
+        self.update_sec_status(hdr.len)?;
+        write_status(
+            &mut self.storage,
+            new_addr,
+            KV_STATUS_NUM,
+            KvStatus::PreWrite as usize,
+        )?;
         let total = hdr.len - lay.kv_magic_off;
         let mut off = 0u32;
         let mut buf = [0u8; 32];
@@ -1608,17 +1839,37 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             self.storage.write(dst, &buf[..chunk as usize])?;
             off += chunk;
         }
-        self.storage
-            .write_status(new_addr, KV_STATUS_NUM, KvStatus::Write as usize)?;
+        write_status(
+            &mut self.storage,
+            new_addr,
+            KV_STATUS_NUM,
+            KvStatus::Write as usize,
+        )?;
         self.cur_sec.empty_kv = new_addr + hdr.len;
         self.cur_sec.remain = self.cur_sec.remain.saturating_sub(hdr.len);
-        self.cache_insert(hash_key(name), new_addr);
-        self.del_kv_addr(hdr.addr, Some(name), true)?;
+        self.cache_insert(hash, new_addr);
+        self.del_kv_addr(hdr.addr, Some(hash), true)?;
         Ok(())
     }
 
+    /// Recovery-only check for a PRE_DELETE record that was already recreated
+    /// at another address: delete the stale copy and report `true`.
+    #[cold]
+    #[inline(never)]
+    fn recovery_dup_check(&mut self, hdr: &KvHeader) -> Result<bool, F::Error> {
+        let mut name = [0u8; KV_NAME_MAX];
+        self.read_name_into(hdr, &mut name)?;
+        let name = &name[..hdr.name_len as usize];
+        let mut existing = KvHeader::EMPTY;
+        if self.find_scan_header_into(name, &mut existing)? && existing.addr != hdr.addr {
+            self.del_kv_addr(hdr.addr, Some(hash_key(name)), true)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn gc_collect_by_free_size(&mut self, free_size: u32) -> Result<(), F::Error> {
-        let (empty, _, last_empty) = self.sector_statistics()?;
+        let (empty, last_empty) = self.sector_statistics()?;
         if empty <= GC_EMPTY_SEC_THRESHOLD {
             let sec_size = self.storage.sec_size();
             // C's `gc_check_cb` records the last EMPTY sector address in scan
@@ -1626,11 +1877,12 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             // stop-check reads *that* sector's remain.
             let mut last_gc_addr = last_empty;
             let mut last_gc_remain: Option<u32> = None;
+            let mut sec = SecInfo::UNKNOWN;
             let mut addr = self.storage.oldest_addr;
             let mut traversed = 0u32;
             loop {
                 traversed += sec_size;
-                let sec = self.read_sector_info(addr, false)?;
+                self.read_sector_info_into(addr, &mut sec)?;
                 if sec.check_ok
                     && (sec.dirty == SectorDirtyStatus::True || sec.dirty == SectorDirtyStatus::Gc)
                 {
@@ -1659,25 +1911,26 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     fn recovery_scan(&mut self) -> Result<(), F::Error> {
         let lay = self.lay();
         let sec_size = self.storage.sec_size();
+        let mut sec = SecInfo::UNKNOWN;
+        let mut hdr = KvHeader::EMPTY;
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
             traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
+            self.read_sector_info_into(addr, &mut sec)?;
             if sec.check_ok
                 && (sec.store == SectorStoreStatus::Using || sec.store == SectorStoreStatus::Full)
             {
                 let mut kv_addr = sec.addr + lay.sec_hdr_size;
                 loop {
-                    let hdr = self.read_kv_header(kv_addr)?;
+                    self.read_kv_header_into(kv_addr, &mut hdr)?;
                     match hdr.status {
                         KvStatus::PreDelete if hdr.valid => {
-                            let name = self.read_name(&hdr)?;
-                            let name_len = hdr.name_len as usize;
-                            self.move_kv(&hdr, &name[..name_len])?;
+                            self.move_kv(&hdr)?;
                         }
                         KvStatus::PreWrite => {
-                            self.storage.write_status(
+                            write_status(
+                                &mut self.storage,
                                 hdr.addr,
                                 KV_STATUS_NUM,
                                 KvStatus::ErrHdr as usize,
@@ -1727,9 +1980,10 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         let mut oldest = 0u32;
         let mut gc_pending = false;
         let mut prev_store = SectorStoreStatus::Unused;
+        let mut sec = SecInfo::UNKNOWN;
         let mut addr = 0u32;
         while addr < max_size {
-            let sec = self.read_sector_info(addr, false)?;
+            self.read_sector_info_into(addr, &mut sec)?;
             if !sec.check_ok {
                 failed += 1;
             } else if sec.dirty == SectorDirtyStatus::Gc {
@@ -1760,7 +2014,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             // Format only the damaged sectors.
             let mut addr = 0u32;
             while addr < max_size {
-                let sec = self.read_sector_info(addr, false)?;
+                self.read_sector_info_into(addr, &mut sec)?;
                 if !sec.check_ok {
                     self.format_sector(addr, SECTOR_NOT_COMBINED)?;
                 }
@@ -1805,17 +2059,20 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     pub fn check(&mut self) -> Result<(), F::Error> {
         let sec_size = self.storage.sec_size();
         let lay = self.lay();
+        let mut sec = SecInfo::UNKNOWN;
+        let mut hdr = KvHeader::EMPTY;
+        let mut scratch = [0u8; 8];
         let mut addr = self.storage.oldest_addr;
         let mut traversed = 0u32;
         loop {
             traversed += sec_size;
-            let sec = self.read_sector_info(addr, false)?;
+            self.read_sector_info_into(addr, &mut sec)?;
             if sec.check_ok
                 && (sec.store == SectorStoreStatus::Using || sec.store == SectorStoreStatus::Full)
             {
                 let mut kv_addr = sec.addr + lay.sec_hdr_size;
                 loop {
-                    let hdr = self.read_kv_header(kv_addr)?;
+                    self.read_kv_header_into(kv_addr, &mut hdr)?;
                     if !hdr.valid {
                         // The record area ends at the first fully erased header.
                         if hdr.erased {
@@ -1824,11 +2081,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                         return Err(Error::ReadCorrupted);
                     }
                     if hdr.status == KvStatus::Write || hdr.status == KvStatus::PreDelete {
-                        let name = self.read_name(&hdr)?;
-                        let mut entry = self.entry_from_header(&hdr);
-                        entry.name = name;
-                        let mut scratch = [0u8; 8];
-                        self.read_value_verified(&entry, None, &mut scratch)?;
+                        self.read_value_verified(&hdr, None, &mut scratch)?;
                     }
                     let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
                     if next == FAILED_ADDR {
@@ -1879,7 +2132,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
 impl<'a, F: Flash, const CACHE: usize> KvIterator<'a, F, CACHE> {
     /// Copy the value of `entry` into `buf`; returns the copied length.
     pub fn read_value(&mut self, entry: &KvEntry, buf: &mut [u8]) -> Result<usize, F::Error> {
-        self.db.read_value_verified(entry, None, buf)
+        self.db.read_value_verified(&entry.header(), None, buf)
     }
 }
 
@@ -1890,7 +2143,6 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
         if self.done {
             return None;
         }
-        let lay = self.db.lay();
         let sec_size = self.db.storage.sec_size();
         loop {
             if !self.in_sector {
@@ -1899,13 +2151,13 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
                     return None;
                 }
                 self.traversed_len += sec_size;
-                let sec = match self.db.read_sector_info(self.sector_addr, false) {
-                    Ok(sec) => sec,
-                    Err(e) => {
-                        self.done = true;
-                        return Some(Err(e));
-                    }
-                };
+                // Scoped so the 24-byte `SecInfo` slot can be reused by the
+                // record/entry locals below (smaller iterator frame).
+                let mut sec = SecInfo::UNKNOWN;
+                if let Err(e) = self.db.read_sector_info_into(self.sector_addr, &mut sec) {
+                    self.done = true;
+                    return Some(Err(e));
+                }
                 let next_sec = self.db.next_sector_addr(&sec, self.traversed_len);
                 self.sector_addr = next_sec;
                 if sec.check_ok
@@ -1913,7 +2165,7 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
                         || sec.store == SectorStoreStatus::Full)
                 {
                     self.sec_end = sec.addr + sec_size;
-                    self.next_addr = sec.addr + lay.sec_hdr_size;
+                    self.next_addr = sec.addr + self.db.lay().sec_hdr_size;
                     self.in_sector = true;
                 } else {
                     continue;
@@ -1923,31 +2175,24 @@ impl<'a, F: Flash, const CACHE: usize> Iterator for KvIterator<'a, F, CACHE> {
                 self.in_sector = false;
                 continue;
             }
-            let hdr = match self.db.read_kv_header(self.next_addr) {
-                Ok(hdr) => hdr,
+            let mut hdr = KvHeader::EMPTY;
+            if let Err(e) = self.db.read_kv_header_into(self.next_addr, &mut hdr) {
+                self.done = true;
+                return Some(Err(e));
+            }
+            match self.db.advance_kv(self.sec_end, &hdr) {
+                Ok(next) => self.next_addr = next,
                 Err(e) => {
                     self.done = true;
                     return Some(Err(e));
                 }
-            };
-            let next = match self.db.advance_kv(self.sec_end, &hdr) {
-                Ok(next) => next,
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            };
-            self.next_addr = next;
+            }
             if hdr.valid && hdr.status == KvStatus::Write {
-                let name = match self.db.read_name(&hdr) {
-                    Ok(name) => name,
-                    Err(e) => {
-                        self.done = true;
-                        return Some(Err(e));
-                    }
-                };
                 let mut entry = self.db.entry_from_header(&hdr);
-                entry.name = name;
+                if let Err(e) = self.db.read_name_into(&hdr, &mut entry.name) {
+                    self.done = true;
+                    return Some(Err(e));
+                }
                 return Some(Ok(entry));
             }
             // Invalid or non-committed record: keep going.

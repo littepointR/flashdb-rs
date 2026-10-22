@@ -75,7 +75,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(test)]
+#[cfg(any(test, feature = "std"))]
 extern crate std;
 
 mod error;

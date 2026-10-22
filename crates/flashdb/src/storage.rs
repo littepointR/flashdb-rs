@@ -187,13 +187,30 @@ impl<F: Flash> Storage<F> {
         if status == 0 {
             return Ok(());
         }
+        let wg = F::WRITE_GRAN_BITS;
+        if wg <= 8 {
+            // One write-granule chunk is a single byte for both supported small
+            // granularities: wg == 8 stores one byte per status index, wg == 1
+            // stores the whole table bit-packed (MSB first). Encode the byte
+            // here instead of clearing a 32-byte scratch and calling
+            // encode_status: this is the hottest write path (every record
+            // status transition) and the scratch made every inlined call site
+            // emit a 32-byte __aeabi_memclr.
+            let (off, byte) = if wg == 1 {
+                let bit = status - 1;
+                (bit / 8, 0xFFu8 >> ((bit % 8) + 1))
+            } else {
+                (status - 1, 0u8)
+            };
+            return self.write(addr + off as u32, &[byte]);
+        }
         let mut scratch = [0u8; 32];
-        let (offset, bytes) = low::encode_status(F::WRITE_GRAN_BITS, status, &mut scratch);
-        // Copy out of the scratch borrow so the flash borrow is free.
-        let mut out = [0u8; 32];
+        let (offset, bytes) = low::encode_status(wg, status, &mut scratch);
+        // `bytes` borrows the local scratch, `self` is a disjoint borrow, so the
+        // status can be written straight out of the scratch buffer (a second
+        // 32-byte copy-out buffer only grows the caller's stack frame).
         let len = bytes.len();
-        out[..len].copy_from_slice(bytes);
-        self.write(addr + offset as u32, &out[..len])
+        self.write(addr + offset as u32, &bytes[..len])
     }
 
     /// Whether `addr` is sector aligned.
