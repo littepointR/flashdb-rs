@@ -6,10 +6,13 @@ the ultra-lightweight embedded key-value and time-series database for raw flash.
 The rewrite keeps the proven FlashDB on-flash format (data written by FlashDB-C
 mounts in Rust and vice versa) but replaces the implementation with a `no_std`,
 allocation-free Rust design that is **faster and uses less RAM** than the C
-original on the benchmark suite in `harness/`. ROM is close to parity once the
-CRC table is trimmed and the firmware is built for size: see
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the measured numbers and the
-remaining gap.
+original on the benchmark suite in `harness/`. With the size build plus
+`small-crc` and the `-InlineThreshold 50` codegen flag it now also reaches
+**ROM and stack parity on real silicon**, with a full C-vs-Rust acceptance
+(11/11 checks) passing on a NUCLEO-U545RE-Q: see
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the measured numbers and
+[`docs/OPTIMIZATION.md`](docs/OPTIMIZATION.md) for the optimisation record.
+
 
 ```rust
 use flashdb::{Config, Flash, Kvdb};
@@ -103,11 +106,23 @@ but on silicon, with a RAM NOR simulator, DWT cycle counters and a RAM result
 buffer read back over SWD. See
 [`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md).
 
-Status at bring-up: the harness builds and the image is verified, but the
-on-board ST-LINK/V3 firmware (V3J17M10) cannot program STM32U5 — every flash
-attempt stalls the probe — so the run is blocked on a probe firmware update
-(or an alternative probe). The default QEMU firmware and the library are
-unaffected.
+Verified on silicon: the firmware completes with `rc=0`, both `RESULT` lines are
+byte-identical over repeated runs, and all workload checksums
+(`kv_checksum`, `kv_iter_checksum`, `ts_checksum`) match the QEMU Cortex-M3
+baseline exactly. The C reference has the same board backend, so the comparison
+is like-for-like on identical silicon, and **the acceptance now passes in both
+the stable and the nightly `size` build**: ROM 13 332 B / 13 296 B vs C 13 360 B,
+stack 1 072 B vs 1 240 B, static RAM 640 B vs 1 072 B, and every workload phase
+is faster than C (total CPU −34.6 %; the CPU-fast `release` profile is −43.0 %
+but larger ROM). The board run also covers **TSDB rollover** (1 200 appends past
+capacity, live-window/remount/NOR-safety checks) and proves the C and Rust
+images leave **byte-identical flash partitions**. Flashing uses **probe-rs**,
+which programs the STM32U5 independently of the probe's own flash loader; the
+earlier OpenOCD/pyOCD probe hang does not apply to that path, and no ST-LINK
+firmware update was needed. Full tables, reproduction commands and the exact
+acceptance configuration:
+[`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md); test
+inventory and coverage: [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Compatibility
 
@@ -144,6 +159,14 @@ scripts/c_test.sh                        # C behavioural checks (reference)
 scripts/fw_c.sh && scripts/fw_rust.sh    # firmware ROM/RAM/stack comparison (QEMU)
 ```
 
+On real hardware (`NUCLEO-U545RE-Q`, see
+[`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md)):
+
+```sh
+harness/firmware/u545re/run_rust.sh       # POSIX: build + flash + run (probe-rs/pyOCD/OpenOCD)
+harness/firmware/u545re/run_rust.ps1      # Windows/PowerShell: build + flash + run (probe-rs)
+```
+
 The benchmarks use a RAM-backed NOR simulator with exact NOR semantics
 (program only clears bits, erase sets `0xFF`) and count every flash
 read/write/erase and byte, so results are comparable across machines and
@@ -154,23 +177,30 @@ meaningful for real flash.
 Benchmarked against FlashDB-C with identical workloads and a counting NOR
 simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-| metric (Cortex-M3, same workload) | C FlashDB | Rust |
+| metric (Cortex-M3 QEMU, same workload) | C FlashDB | Rust |
 |---|---:|---:|
-| ROM (`-Os` vs `-z`) | 11 408 B | 13 724 B (12 776 B with `small-crc`; 12 144 B smallest nightly build) |
+| ROM (`-Os` vs `-z` + `small-crc` + `-InlineThreshold 50`) | 11 408 B | 11 624 B (+1.9 %); on silicon **13 332 B vs C 13 360 B (parity)** |
 | static RAM | 1 064 B | **624 B** |
-| static + stack RAM | 2 256 B | **1 880 B** |
+| stack high-water | 1 192 B | **1 008 B** |
+| static + stack RAM | 2 256 B | **1 632 B** |
 | KV flash reads (hot get / miss / update / iterate) | 6 000 / 159 / 11.1 / 15.9 per op | **4 / 37 / 8.0 / 6.9** |
 | TS flash reads / writes / erases | identical to C in every scenario | identical |
-| host CPU | baseline | faster in 11/16 scenarios in the default build |
 
 All scenarios produce identical logical checksums, and Rust-written and
-C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. ROM is the
-one metric not yet at parity; the remaining gap is Rust bounds/runtime/harness
-overhead, and the size levers above are documented in `docs/BENCHMARKS.md` (the nightly `build-std` size build is measured at 12 144 B). Run `scripts/size_matrix.sh` to reproduce every configuration in one table.
+C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. On the real
+board the C-vs-Rust acceptance passes every check (ROM, static RAM, stack,
+static+stack, all five cycle phases, 21 logical fields, both raw image
+checksums); the QEMU harness image is still +216 B ROM because of its different
+rodata/code split, while the board image is −64 B. The optimisation record and
+the remaining optional levers are in `docs/OPTIMIZATION.md`.
 
-One build option is available for the size/CPU trade-off:
-`--features small-crc` (64-byte CRC table instead of 1 KiB, −948 B ROM, ~2x
-CRC CPU which only matters for large values).
+Two build options matter for the size/CPU trade-off:
+`--features small-crc` (64-byte CRC table instead of 1 KiB, −960 B rodata, ~2x
+CRC CPU which only matters for large values) and the codegen flag
+`-C llvm-args=-inline-threshold=50` (the `-Oz` default inliner is too
+conservative: −84 B ROM and −22 % TS / −21 % rollover CPU on silicon). On the
+board, the `release` profile remains the CPU-fastest option (total −43 %) at the
+cost of ROM.
 
 ## License
 

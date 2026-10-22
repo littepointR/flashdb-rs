@@ -87,43 +87,90 @@ full KV iteration, 200 TSDB appends and full TSDB iteration, checksummed.
 C is `arm-none-eabi-gcc -Os` with FAL; Rust is `thumbv7m-none-eabi`,
 fat LTO, `panic=abort`, tiny `__aeabi_mem*` overrides (equivalent to the C
 harness's libc stubs). The simulated flash lives in a detached `NOLOAD` region
-in both images, so it counts as neither ROM nor MCU RAM.
+in both images, so it counts as neither ROM nor MCU RAM. The Rust numbers below
+use the acceptance configuration: `small-crc` plus
+`-C llvm-args=-inline-threshold=50` (see §4b and `docs/OPTIMIZATION.md`).
 
 | metric | C FlashDB (-Os) | Rust `opt-level="s"` | Rust `opt-level="z"` |
 |---|---:|---:|---:|
-| `.text` | 9 720 B | 13 768 B | 12 276 B |
-| `.rodata` | 1 632 B | 1 448 B | 1 448 B |
+| `.text` | 9 720 B | 12 836 B | 11 116 B |
+| `.rodata` | 1 632 B | 508 B | 508 B |
 | `.data` | 56 B | 0 | 0 |
-| **ROM total** | **11 408 B** | **15 216 B** (+33%) | **13 724 B** (+20%) |
+| **ROM total** | **11 408 B** | **13 344 B** (+17%) | **11 624 B** (+1.9%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
-| stack high-water | 1 192 B | 1 256 B | 1 376 B |
-| **static + stack RAM** | **2 256 B** | **1 880 B** (−17%) | **2 000 B** (−11%) |
+| stack high-water | 1 192 B | **1 008 B** (−15%) | **1 008 B** (−15%) |
+| **static + stack RAM** | **2 256 B** | **1 632 B** (−28%) | **1 632 B** (−28%) |
 | workload checksums | KV `0x4b3486a4`, TS `0x10d90680` | identical | identical |
 
-Per-phase stack high-water (diagnostic builds; `--phases`):
+Per-phase stack high-water (diagnostic builds; `--phases`, threshold-50 codegen):
 
 | phase | C | Rust `-s` | Rust `-z` |
 |---|---:|---:|---:|
-| mount/init | 752 B | 904 B | 968 B |
-| KV set | 736 B | 936 B | 968 B |
-| KV get | 720 B | 1 040 B | 1 032 B |
-| KV iterate | 560 B | 736 B | 808 B |
-| KV GC churn | 1 248 B | 1 352 B | 1 440 B |
-| TS append | 528 B | 664 B | 712 B |
-| TS iterate | 568 B | 752 B | 768 B |
+| mount/init | 752 B | 320 B | 360 B |
+| KV set | 736 B | 608 B | 688 B |
+| KV get | 720 B | 632 B | 728 B |
+| KV iterate | 560 B | 656 B | 760 B |
+| KV GC churn | 1 248 B | 976 B | 1 056 B |
+| TS append | 528 B | 496 B | 568 B |
+| TS iterate | 568 B | 656 B | 768 B |
+
+The QEMU firmware is still +216 B ROM over C in the `-z` configuration (the
+board acceptance below passes because the board harness has a different
+rodata/code split); RAM and stack are clearly better in both profiles.
 
 ### Size/performance options
 
 The library exposes one build option that trades ROM for CPU; it keeps the
-on-flash format and behaviour identical:
+on-flash format and behaviour identical.
 
-| configuration | ROM (`-z`) | trade-off |
+| configuration | ROM (QEMU, `-z`) | note |
 |---|---:|---|
-| default (256-byte CRC table) | 13 724 B | reference build (stable toolchain) |
-| default + `--features small-crc` (`scripts/fw_rust.sh size --small-crc`) | 12 776 B | 64-byte CRC table; ~2x CRC CPU (only matters for large values) |
-| nightly `build-std` size build, default CRC (`scripts/fw_rust_nightly.sh`) | 13 096 B | nightly toolchain for `panic=immediate-abort` + `build-std`; identical behaviour |
-| nightly `build-std` size build + `small-crc` (`scripts/fw_rust_nightly.sh --small-crc`) | **12 144 B (+6%)** | smallest measured; nightly toolchain |
+| default (256-entry CRC table) | 12 724 B | threshold-50 codegen |
+| default + `--features small-crc` | **11 624 B** | 64-byte CRC table; accepted configuration |
+| + `-InlineThreshold -1` (LLVM `-Oz` default) | 11 640 B | flag-free A/B reference |
+| nightly `build-std` + `small-crc` | board ROM 13 296 B | smallest photographed image (`compare.ps1 -Nightly`) |
+
+The size build also gets a free CPU win from the codegen flag: on silicon
+`-C llvm-args=-inline-threshold=50` took the `size` profile from TS 531 033 to
+414 319 cycles and rollover 3 184 271 to 2 502 609 cycles before the library
+refactor (a further −65 k / −407 k came from the refactor), at −84 B ROM. See
+`docs/OPTIMIZATION.md` for the full threshold sweep.
+
+### 4b. On-silicon acceptance (NUCLEO-U545RE-Q)
+
+`harness/firmware/u545re/compare.ps1` builds and flashes both images on the
+same STM32U545RE and checks every metric plus 21 logical result fields. The
+acceptance passes in two configurations (reports:
+`harness/firmware/build/u545re/board_compare*.txt`):
+
+| metric (on silicon) | C FlashDB | Rust `size` (stable) | Rust nightly | Rust `release` |
+|---|---:|---:|---:|---:|
+| ROM (text+rodata+data) | 13 360 B | **13 332 B** | **13 296 B** | 15 256 B |
+| static RAM | 1 072 B | **640 B** | **640 B** | **640 B** |
+| stack high-water | 1 240 B | **1 072 B** | **1 072 B** | **1 040 B** |
+| static + stack | 2 312 B | **1 712 B** | **1 712 B** | **1 680 B** |
+| cycles mount | 521 632 | **275 050** | **275 021** | **339 286** |
+| cycles KV | 34 398 930 | **21 910 833** | **21 980 693** | **18 957 732** |
+| cycles TS | 391 359 | **348 295** | **348 888** | **301 637** |
+| cycles rollover | 2 554 342 | **2 092 410** | **2 095 317** | **1 882 504** |
+| cycles total | 38 160 952 | **24 949 003** | **25 022 334** | **21 770 372** |
+| acceptance verdict | — | **PASS (11/11)** | **PASS (11/11)** | ROM only FAIL |
+
+Reports for all three runs are committed under `docs/acceptance/`
+(`board_compare_nightly.txt`, `board_compare_size_stable.txt`,
+`board_compare_release_stable.txt`).
+
+All 21 logical fields (workload counts/checksums, rollover state, both raw
+partition checksums, `rc`) are identical between C and Rust in every
+configuration, and both images leave byte-identical flash partitions.
+
+* **Stable `size` + `small-crc` + `-InlineThreshold 50`** is the recommended
+  configuration: no nightly toolchain needed, all checks pass, ROM −28 B.
+* **Nightly `-Z build-std` + `panic=immediate-abort` + ICF** is the smallest
+  image (ROM −64 B) and needs `rustup toolchain install nightly --component rust-src`.
+* **`release` (`-s`)** is the CPU-fastest build (total −43 %) but its ROM is
+  +1 896 B, so it fails only the ROM check.
 
 ### Interpretation
 
@@ -169,6 +216,12 @@ the floor is reproducible rather than assumed):
 | `continue_ff_addr` simplification | −16 B |
 | alternate state sizes / redundant `done` checks / stride-based end-info | −24 B |
 | harness: compact formatter, merged loops, shared error tags | −152 B (ROM) |
+| **this round** | |
+| `-C llvm-args=-inline-threshold=50` (LLVM `-Oz` default is too conservative) | **−84 B board ROM, TS −117 k cycles, rollover −682 k** |
+| LLD `--icf=all` | **−28 B** |
+| KV refactor (out-param headers/sectors, addr-only lookups, GC/alloc/move restructure) | **−1 056 B `text` (QEMU phases), −408 B stack** |
+| TS refactor (de-sret decode, cold seal/scan, iterator fast path) | **−190 B TS symbols, −136 B st_ts_append** |
+| `Storage::write_status` `wg<=8` direct byte (no 32-byte scratch/memclr) | **≈−350 B `text`, TS −60 k cycles on silicon** |
 | **measured, reverted** | |
 | global `#[inline(never)]` | +3 400 B |
 | opaque `black_box` call barriers | +604 B |
@@ -176,12 +229,15 @@ the floor is reproducible rather than assumed):
 | splitting `read_sector_info` into header+traversal | +160 B |
 | `min-size` bounds-check removal (LLVM already elides most checks) | ±0 B |
 | LLVM merge-functions / outliner / MIR flags, thin LTO, CU=16 | 0…+1 800 B |
+| broad `#[inline(always)]` over storage/low leaf helpers | TS −65 k, but **+1 492 B** (rejected; the threshold flag is cheaper) |
 
-The remaining ≈0.7 KiB cannot be removed without either audited-unchecked hot
-paths or dropping features (read CRC verification, crash recovery), both of
-which conflict with the crate's design goals. The size-optimised builds above
-are therefore the recommended trade-off; `small-crc` costs CPU only when large
-values are checksummed.
+The remaining `.text` is still larger than C's (11 116 B vs 9 720 B in the QEMU
+`-z` build), but the `small-crc` 64-byte table and shorter strings make
+`.rodata` 1 124 B smaller, so the QEMU ROM is only +216 B. On the real board the
+ledger flips: Rust `.text` +1 312 B but `.rodata` −1 284 B → ROM **−64 B**, i.e.
+at parity. Further ROM work means `.text` work; the measured optional levers
+(nightly `optimize_for_size` −80 B, `--lto-O3` −48 B, thin-pointer harness labels
+~100–150 B) are listed in `OPTIMIZATION.md`.
 
 ## 5. On-flash compatibility (differential)
 
@@ -201,34 +257,50 @@ image (KV + TS partitions), then each implementation mounts the other's image.
   (granules 1…256 bits) → 0 mismatches, plus 31 corrupted-image read/write
   variants where C and Rust outputs are identical.
 
-`cargo test -p flashdb --release` runs 90 tests (83 test functions + 7 doctests), including the
+`cargo test -p flashdb --release` runs 94 tests (87 test functions + 7 doctests), including the
 original C test cases ported assertion-for-assertion
 (`kvdb_c_parity.rs`, `tsdb_c_parity.rs`), byte-level layout tests for all six
-write granularities, crash recovery, rollover and iteration boundary cases.
+write granularities, crash recovery (including across a ring wrap), rollover and
+iteration boundary cases, and error-type surface tests. Line coverage of the
+crate from this suite is **85.7 %** (functions 89.2 %; `error.rs` and `flash.rs`
+100 %, `low.rs` 94.3 %, `tsdb.rs` 85.3 %, `kvdb.rs` 82.9 %, `storage.rs` 80.3 %) —
+reproduce with `cargo llvm-cov -p flashdb --release --summary-only`. See
+[`docs/TESTING.md`](TESTING.md) for the full test inventory (host, QEMU, C
+reference and on-silicon layers).
 
 ## 6. Status summary
 
 | objective | result |
 |---|---|
-| functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 90 tests green |
-| performance at least C | **achieved on flash traffic** (never more ops; KV 2–5x fewer reads); host CPU faster in 11/16 scenarios in the default build |
-| RAM at least C | **achieved** — static 624 B vs 1064 B; static+stack 1 880 B vs 2 256 B (`-s`) |
-| ROM at least C | **not achieved** — 13 724 B vs 11 408 B (`-z`); 12 776 B with `small-crc`, 12 144 B in the smallest measured nightly build (+6.5%) |
+| functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 94 tests green; on silicon C and Rust print identical 21-field `RESULT` output (workload, rollover state and both raw partition image checksums) |
+| performance at least C | **achieved** — flash traffic never higher (KV 2–5x fewer reads); host CPU faster in 11/16 scenarios; **on silicon every phase is faster than C**: `release` total −43.0 %, `size` total −34.6 %, nightly −34.4 % |
+| RAM at least C | **achieved** — QEMU static 624 B vs 1 064 B, stack 1 008 B vs 1 192 B; on silicon static 640 B vs 1 072 B, stack 1 072 B vs 1 240 B, static+stack 1 712 B vs 2 312 B |
+| ROM at least C | **achieved on silicon** — 13 332 B (stable `size`+`small-crc`+`-InlineThreshold 50`) / 13 296 B (nightly) vs C 13 360 B; QEMU harness still +216 B because its rodata split differs |
+| stack at least C | **achieved** — QEMU 1 008 B vs 1 192 B (`-z`); on silicon 1 072 B vs 1 240 B (`size`), 1 040 B (`release`) |
 
-ROM remains the one open objective. The residual ≈0.8 KiB is the price of the
-safe-Rust design, quantified by the attribution above: the crate's own code is
-≈1–1.5 KiB larger than FlashDB-C's library (bounds checks, `Result` plumbing,
-monomorphisation), the measurement harness is ≈0.4 KiB larger, and ≈0.45 KiB is
-Rust runtime/panic scaffolding that `-Z build-std` already shrinks as far as the
-toolchain allows. Closing the gap would require audited-unsafe unchecked hot
-paths or dropping integrity/recovery features, both of which conflict with the
-crate's design goals; the size-optimised configurations in §4 are the
-recommended trade-off.
+All five acceptance rows are green in the on-silicon verdict (`compare.ps1`,
+11/11 checks). The remaining opportunities are optional margin projects, not
+blockers: harness label trimming (~100–150 B), nightly `optimize_for_size` +
+`--lto-O3` (−124 B measured), and the `.text`-for-speed trade-off if a user
+prefers the `release` profile. The real-hardware methodology, per-configuration
+tables, the rollover / image-identity tests and reproduction commands are in
+[`harness/firmware/u545re/README.md`](../harness/firmware/u545re/README.md).
 
 ## 7. Reproducing the reported numbers
 
 * `harness/results/c_wg{8,1}_host.json` — C reference (last round).
 * `harness/results/rust_wg{8,1}_host.json` — Rust (last round).
 * `harness/firmware/build/{c,rust}/*.elf` — firmware images (git-ignored).
-* `scripts/fw_rust_nightly.sh [--small-crc]` — reproducible smallest-ROM build.
-* `harness/results/verification_report.md` — independent verification matrix.
+* `harness/firmware/u545re/compare.ps1 -Nightly` — full on-silicon acceptance
+  (C rebuilt and flashed, 11 checks, exit status 0). The stable-toolchain
+  equivalent is `compare.ps1 -RustProfile size -RustFeatures small-crc`; both
+  pass. Reports: `harness/firmware/build/u545re/board_compare*.txt`.
+* `scripts/fw_rust.ps1 -Profile size -SmallCrc -Phases` — QEMU ROM + per-phase
+  stack (threshold 50 default; `-InlineThreshold -1` for the old flag-free
+  baseline, `-Cycles` for the deterministic QEMU cycle proxy).
+* `harness/firmware/tools/stack_sizes.py <elf>` — per-function stack frames from
+  a nightly `-Z emit-stack-sizes` build.
+* `cargo llvm-cov -p flashdb --release --summary-only` — host line/function
+  coverage; full test inventory in [`TESTING.md`](TESTING.md).
+* [`OPTIMIZATION.md`](OPTIMIZATION.md) — this round's measured optimisation
+  results (build knobs, before/after checkpoints, remaining headroom).

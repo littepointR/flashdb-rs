@@ -1,0 +1,35 @@
+
+===============================================================
+ C FlashDB vs Rust flashdb -- NUCLEO-U545RE-Q (STM32U545RE)
+===============================================================
+ C image    : harness\firmware\build\c_u545\fw_c_u545.elf
+ Rust image : harness\firmware\build\u545re\fw_rust_u545re_size_smallcrc.elf (size + small-crc, inline-threshold=50)
+ logical    : prints sent to the same NOR simulator, same workload
+
+metric                          C FlashDB           Rust        Rust vs C
+--------------------------    -----------    -----------    -------------
+ROM (text+rodata+data) B            13360          13332       -28 (  -0.2%)
+static RAM (data+bss) B              1072            640      -432 ( -40.3%)
+stack high-water B                   1240           1072      -168 ( -13.5%)
+static+stack RAM B                   2312           1712      -600 ( -26.0%)
+cycles mount                       521632         275050   -246582 ( -47.3%)
+cycles KV                        34398930       21910833 -12488097 ( -36.3%)
+cycles TS                          391359         348295    -43064 ( -11.0%)
+cycles rollover                   2554342        2092410   -461932 ( -18.1%)
+cycles total                     38160952       24949003 -13211949 ( -34.6%)
+
+-- acceptance --
+  [PASS] workload results identical to C: 21 fields, checksums included
+  [PASS] ROM (text+rodata+data) B at least as good as C: 13332 vs 13360
+  [PASS] static RAM (data+bss) B at least as good as C: 640 vs 1072
+  [PASS] stack high-water B at least as good as C: 1072 vs 1240
+  [PASS] static+stack RAM B at least as good as C: 1712 vs 2312
+  [PASS] cycles mount at least as good as C: 275050 vs 521632
+  [PASS] cycles KV at least as good as C: 21910833 vs 34398930
+  [PASS] cycles TS at least as good as C: 348295 vs 391359
+  [PASS] cycles rollover at least as good as C: 2092410 vs 2554342
+  [PASS] cycles total at least as good as C: 24949003 vs 38160952
+  [PASS] both images report the same clock: C=4000000 Rust=4000000
+
+VERDICT: PASS -- on identical silicon the Rust image is at least as good
+         as the C reference in ROM, RAM, stack and CPU cycles.
