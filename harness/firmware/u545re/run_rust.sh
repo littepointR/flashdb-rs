@@ -13,6 +13,7 @@
 #   harness/firmware/u545re/run_rust.sh              # build + flash + run
 #   harness/firmware/u545re/run_rust.sh --build-only # build only
 #   harness/firmware/u545re/run_rust.sh --no-build   # reuse the ELF and run
+#   ... --tool pyocd|openocd                        # force a probe backend
 #
 # Requirements: arm-none-eabi-gcc/objcopy/nm, OpenOCD with ST-LINK support, and
 # a NUCLEO-U545RE-Q connected over USB. On macOS, applications that open the
@@ -29,10 +30,12 @@ TARGET=thumbv8m.main-none-eabi
 ELF="$OUT/fw_rust_u545re.elf"
 BUILD_ONLY=0
 DO_BUILD=1
+TOOL="${NUCLEO_TOOL:-auto}"
 for arg in "$@"; do
     case "$arg" in
         --build-only) BUILD_ONLY=1 ;;
         --no-build) DO_BUILD=0 ;;
+        --tool) TOOL="${2:-}"; shift ;;
         -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
@@ -83,7 +86,11 @@ PY
     exit 1
 }
 
-echo "== flash + run on NUCLEO-U545RE-Q =="
+if [ "$TOOL" = "auto" ]; then
+    if command -v pyocd >/dev/null 2>&1; then TOOL=pyocd; else TOOL=openocd; fi
+fi
+
+echo "== flash + run on NUCLEO-U545RE-Q ($TOOL) =="
 echo "   entry   : $ENTRY"
 echo "   estack  : 0x$ESTACK"
 echo "   BOARD_OUT: 0x$OUT_ADDR (0x$OUT_SIZE bytes)"
@@ -94,10 +101,33 @@ if [ "$BUILD_ONLY" = "1" ]; then
     exit 0
 fi
 
-LOG="$OUT/openocd.log"
+LOG="$OUT/$TOOL.log"
 DUMP="$OUT/board_out.bin"
 rm -f "$DUMP" "$LOG"
-if ! openocd -f interface/stlink.cfg -f target/stm32u5x.cfg \
+FLASH_OK=1
+if [ "$TOOL" = "pyocd" ]; then
+    # pyOCD is the primary backend: its STM32U5 support handles the secure
+    # debug state and the flash algorithm did not crash the ST-LINK on this
+    # board (OpenOCD's flash path did). Programming resets the target, which
+    # starts the image from the vector table at 0x08000000.
+    if ! pyocd flash -t stm32u545retxq -f 1m -e auto "$ELF" >"$LOG" 2>&1; then
+        FLASH_OK=0
+    fi
+    sleep 3
+    if [ "$FLASH_OK" = "1" ]; then
+        if ! pyocd commander -t stm32u545retxq -c "halt" \
+                -c "savemem 0x$OUT_ADDR 0x$OUT_SIZE $DUMP" -c "quit" >>"$LOG" 2>&1; then
+            FLASH_OK=0
+        fi
+    fi
+fi
+if [ "$TOOL" != "pyocd" ] || [ "$FLASH_OK" != "1" ]; then
+    # OpenOCD backend (fallback): the ST-LINK V3 firmware on this board hangs
+    # when it drives reset events, so all target events are overridden and the
+    # reset line is only asserted through the flash algorithm itself. On a
+    # healthy probe this path works, but it left the probe hung on this board.
+    LOG="$OUT/openocd.log"
+    if ! openocd -f interface/stlink.cfg -f target/stm32u5x.cfg \
         -c "adapter speed 200" \
         -c "stm32u5x.cpu configure -event examine-end {}" \
         -c "stm32u5x.cpu configure -event reset-init {}" \
@@ -122,6 +152,7 @@ if ! openocd -f interface/stlink.cfg -f target/stm32u5x.cfg \
     echo "If the ST-LINK cannot be opened or times out, unplug/replug the board's" >&2
     echo "USB cable (the probe firmware can hang after a failed flash) and retry." >&2
     exit 1
+    fi
 fi
 
 python3 - "$DUMP" <<'PY'
