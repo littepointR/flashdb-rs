@@ -129,7 +129,7 @@ on-flash format and behaviour identical:
 
 * **RAM: better than C.** Static RAM is 41% smaller: a 512-byte 2-way name
   cache replaces C's 512-byte cache *plus* ~320-byte sector cache, the TSDB
-  struct is 56 B (C: 160 B), and placement mounting (`mount_into`) avoids
+  struct is 64 B on Cortex-M3 (C: 160 B), and placement mounting (`mount_into`) avoids
   copying the database through the stack. Total static+stack RAM is lower than
   C's despite Rust using more stack per call.
 * **Performance: better than C on hardware-relevant work.** Every scenario has

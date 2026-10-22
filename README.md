@@ -5,8 +5,11 @@ the ultra-lightweight embedded key-value and time-series database for raw flash.
 
 The rewrite keeps the proven FlashDB on-flash format (data written by FlashDB-C
 mounts in Rust and vice versa) but replaces the implementation with a `no_std`,
-allocation-free, `unsafe`-free Rust design that is **faster and smaller** than
-the C original on the benchmark suite in `harness/`.
+allocation-free Rust design that is **faster and uses less RAM** than the C
+original on the benchmark suite in `harness/`. ROM is close to parity once the
+CRC table is trimmed and the firmware is built for size: see
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the measured numbers and the
+remaining gap.
 
 ```rust
 use flashdb::{Config, Flash, Kvdb};
@@ -51,7 +54,7 @@ internals are Rust-native:
 * **No global state.** A database owns its flash through generics
   (`Kvdb<F>` / `Tsdb<F, T>`), instead of a FAL registry and a global lock.
   Implement the `Flash` trait for a partition view and pass it in.
-* **No heap, no global state.** `#![no_std]`, all buffers are stack or
+* **No heap.** `#![no_std]`, all buffers are stack or
   caller-provided. The crate is `#![deny(unsafe_code)]` with two audited placement-initializer
   functions (`Kvdb::mount_into`, `Tsdb::mount_into`) so that a database stored
   in a `static` (the normal MCU pattern) needs no stack copy.
@@ -69,7 +72,7 @@ internals are Rust-native:
   into the caller's buffer instead of reading the value twice.
 * **Less RAM.** A 2-way set-associative 64-entry name cache (516 B incl. LRU)
   replaces C's 512 B cache *plus* ≈320 B sector cache. The `Kvdb` struct is
-  548 B vs C's 1064 B; `Tsdb` is 140 B vs 160 B (32-bit targets). Embedded
+  560 B on Cortex-M3 (C: 1064 B); `Tsdb` is 64 B (C: 160 B). Embedded
   users can mount both databases directly into `static`s
   (`Kvdb::mount_into`, `Tsdb::mount_into`), avoiding the stack copy of the
   database struct that a by-value constructor would otherwise need.
@@ -90,7 +93,7 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
 | `harness/c/` | C reference harness (RAM FAL, benchmarks, image tool, behavioural checks) |
 | `harness/firmware/` | Cortex-M3/QEMU firmware comparison (C vs Rust): `.text/.rodata/.data/.bss`, stack high-water |
 | `harness/SCENARIOS.md` | the normative benchmark protocol shared by C and Rust |
-| `reference/FlashDB` | upstream clone used for differential testing (not part of the crate) |
+| `reference/FlashDB` | upstream clone used for differential testing, fetched by script (not part of the crate) |
 
 ## Compatibility
 
@@ -109,7 +112,12 @@ file if needed. See “Known deviations” in `docs/DESIGN.md`.
 
 ## Building and testing
 
+Prerequisites: Rust (`cargo`), a C99 compiler, `arm-none-eabi-*` plus QEMU for
+the firmware comparison, and the upstream FlashDB sources for the differential
+C harness:
+
 ```sh
+scripts/fetch_reference.sh               # clone FlashDB 2.2.x into reference/FlashDB
 cargo test -p flashdb --release          # unit + smoke + parity tests
 cargo build -p flashdb --target thumbv7m-none-eabi --release   # no_std build
 
@@ -152,6 +160,15 @@ CRC CPU which only matters for large values).
 
 ## License
 
-Apache-2.0, same as the original FlashDB. The on-flash format and algorithm
-behaviour are derived from FlashDB (Copyright (c) 2020-2023 Armink); this
-rewrite is an independent implementation.
+Licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+* MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+This crate is an independent Rust implementation of the FlashDB on-flash format
+and behaviour. FlashDB itself (https://github.com/armink/FlashDB, Copyright (c)
+2020 Armink, Apache-2.0) is not included in this repository; it is fetched by
+`scripts/fetch_reference.sh` for differential testing. See [NOTICE](NOTICE) for
+the attribution details.

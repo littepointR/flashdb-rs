@@ -176,8 +176,8 @@ fast range query, rollover ring), same recovery rules, expressed as iterators:
 * Append takes an explicit timestamp (`append(time, data)`) instead of calling
   a `get_time` function pointer through the DB; `append_now()` is provided for
   tests/RTC-less devices.
-* `Tsdb` stores no function pointers, so it is a small plain struct (140 B on
-  a 32-bit target vs C's 160 B).
+* `Tsdb` stores no function pointers, so it is a small plain struct (64 B on
+  Cortex-M3 / 56 B on a 64-bit host vs C's 160 B).
 
 ## 6. Error handling
 
