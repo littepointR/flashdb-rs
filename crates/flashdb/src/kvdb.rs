@@ -54,12 +54,12 @@
 
 use crate::error::{Error, Result};
 use crate::flash::Flash;
+use crate::low;
 use crate::low::{
     align_up, crc32, crc32_u32, decode_status, encode_status, get_u32, put_u32, wg_align, KvLayout,
     KvStatus, SectorDirtyStatus, SectorStoreStatus, FAILED_ADDR, KVDB_SECTOR_MAGIC, KV_MAGIC,
     KV_NAME_MAX, SECTOR_COMBINED, SECTOR_NOT_COMBINED,
 };
-use crate::low;
 use crate::storage::{Config, Storage};
 
 /// Number of empty sectors that must remain before GC starts collecting.
@@ -734,8 +734,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             }
             if set_index < 32 {
                 let new_mru = (slot_index - base) as u32;
-                self.cache_lru = (self.cache_lru & !(1 << set_index))
-                    | (new_mru << set_index);
+                self.cache_lru = (self.cache_lru & !(1 << set_index)) | (new_mru << set_index);
             }
         }
         self.cache[slot_index] = CacheSlot { hash, addr };
@@ -958,7 +957,8 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             let mut kv_addr = addr + hdr_size;
             loop {
                 let hdr = self.read_kv_header(kv_addr)?;
-                if !hdr.valid && hdr.status != KvStatus::PreWrite && hdr.status != KvStatus::ErrHdr {
+                if !hdr.valid && hdr.status != KvStatus::PreWrite && hdr.status != KvStatus::ErrHdr
+                {
                     if hdr.erased {
                         // Trailing erased area: C's sector cache keeps this
                         // sector's empty_kv/remain up to date, i.e. the free
@@ -1112,9 +1112,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         let candidate = match using_cand {
             Some(sec) => Some(sec),
             None => match first_empty {
-                Some(empty_addr)
-                    if empty > GC_EMPTY_SEC_THRESHOLD || self.gc_request =>
-                {
+                Some(empty_addr) if empty > GC_EMPTY_SEC_THRESHOLD || self.gc_request => {
                     let t = self.read_sector_info(empty_addr, true)?;
                     if t.remain > kv_size + threshold {
                         Some(t)
@@ -1634,8 +1632,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                 traversed += sec_size;
                 let sec = self.read_sector_info(addr, false)?;
                 if sec.check_ok
-                    && (sec.dirty == SectorDirtyStatus::True
-                        || sec.dirty == SectorDirtyStatus::Gc)
+                    && (sec.dirty == SectorDirtyStatus::True || sec.dirty == SectorDirtyStatus::Gc)
                 {
                     if self.do_gc(&sec, free_size, &mut last_gc_addr, &mut last_gc_remain)? {
                         break;

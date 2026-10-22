@@ -94,7 +94,8 @@ fn check_range(db: &mut Tsdb<Nor>, times: &[i32], from: i32, to: i32) {
     let actual = collect_by_time(db, from, to);
     let want = expected(times, from, to);
     assert_eq!(
-        actual, want,
+        actual,
+        want,
         "iter_by_time({from}, {to}) mismatch (forward={})",
         from <= to
     );
@@ -216,7 +217,10 @@ fn by_time_random_ranges() {
 #[test]
 fn by_time_matches_a_filtered_full_scan() {
     let mut db = populated(250);
-    let forward: Vec<i32> = collect_forward(&mut db).into_iter().map(|(t, _, _)| t).collect();
+    let forward: Vec<i32> = collect_forward(&mut db)
+        .into_iter()
+        .map(|(t, _, _)| t)
+        .collect();
     let mut seed = 0xDEAD_BEEFu32;
     for _ in 0..200 {
         seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -303,7 +307,10 @@ fn by_time_after_set_status() {
             db.set_status(entry, TslStatus::Deleted).unwrap();
         }
     }
-    assert_eq!(db.query_count(0, i32::MAX, TslStatus::Deleted).unwrap(), 100);
+    assert_eq!(
+        db.query_count(0, i32::MAX, TslStatus::Deleted).unwrap(),
+        100
+    );
     assert_eq!(db.query_count(0, i32::MAX, TslStatus::Write).unwrap(), 100);
     assert_eq!(collect_by_time(&mut db, 0, i32::MAX), times);
     assert_eq!(

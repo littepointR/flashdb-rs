@@ -231,9 +231,8 @@ enum IterMode<T: Timestamp> {
 
 /// Per-mode stepping function used by [`TslIterator::next`].
 #[allow(type_alias_bounds)] // the bound is needed to name `F::Error`
-type NextFn<'a, F: Flash, T> = for<'b> fn(
-    &'b mut TslIterator<'a, F, T>,
-) -> Option<Result<TslEntry<T>, F::Error>>;
+type NextFn<'a, F: Flash, T> =
+    for<'b> fn(&'b mut TslIterator<'a, F, T>) -> Option<Result<TslEntry<T>, F::Error>>;
 
 /// Iterator over the entries of a [`Tsdb`].
 ///
@@ -321,7 +320,12 @@ const fn align_to(size: u32, align: u32) -> u32 {
 /// `get_next_sector_addr()`: the next sector in write order, `None` when a
 /// full round over the partition has been traversed.
 #[inline]
-fn next_sector_addr(sec_addr: u32, traversed_len: u32, sec_size: u32, max_size: u32) -> Option<u32> {
+fn next_sector_addr(
+    sec_addr: u32,
+    traversed_len: u32,
+    sec_size: u32,
+    max_size: u32,
+) -> Option<u32> {
     if traversed_len + sec_size <= max_size {
         if sec_addr + sec_size < max_size {
             Some(sec_addr + sec_size)
@@ -337,7 +341,12 @@ fn next_sector_addr(sec_addr: u32, traversed_len: u32, sec_size: u32, max_size: 
 /// `get_last_sector_addr()`: the previous sector in write order, `None` when a
 /// full round over the partition has been traversed.
 #[inline]
-fn prev_sector_addr(sec_addr: u32, traversed_len: u32, sec_size: u32, max_size: u32) -> Option<u32> {
+fn prev_sector_addr(
+    sec_addr: u32,
+    traversed_len: u32,
+    sec_size: u32,
+    max_size: u32,
+) -> Option<u32> {
     if traversed_len + sec_size <= max_size {
         if sec_addr >= sec_size {
             Some(sec_addr - sec_size)
@@ -361,7 +370,12 @@ fn next_tsl_addr(pre_index: u32, end_idx: u32, log_idx_size: u32) -> Option<u32>
 
 /// `get_last_tsl_addr()`: previous index record inside a sector that has entries.
 #[inline]
-fn prev_tsl_addr(pre_index: u32, sec_addr: u32, log_idx_size: u32, sec_hdr_size: u32) -> Option<u32> {
+fn prev_tsl_addr(
+    pre_index: u32,
+    sec_addr: u32,
+    log_idx_size: u32,
+    sec_hdr_size: u32,
+) -> Option<u32> {
     if pre_index >= sec_addr + sec_hdr_size + log_idx_size {
         Some(pre_index - log_idx_size)
     } else {
@@ -670,7 +684,6 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             }
         }
 
-
         Ok(())
     }
 
@@ -794,19 +807,16 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     pub fn max_blob_count(&self) -> usize {
         let sec_size = self.storage.sec_size() as usize;
         let sec_hdr_size = self.lay().sec_hdr_size as usize;
-        let blob_size = self.lay().log_idx_size as usize
-            + wg_align(self.max_len as usize, F::WRITE_GRAN_BITS);
+        let blob_size =
+            self.lay().log_idx_size as usize + wg_align(self.max_len as usize, F::WRITE_GRAN_BITS);
         let n_sec = self.storage.sector_count() as usize;
         n_sec * (sec_size.saturating_sub(sec_hdr_size) / blob_size)
     }
 
     /// Change the status of an entry (as yielded by an iterator).
     pub fn set_status(&mut self, entry: &TslEntry<T>, status: TslStatus) -> Result<(), F::Error> {
-        self.storage.write_status(
-            entry.index_addr,
-            TSL_STATUS_NUM,
-            tsl_status_index(status),
-        )
+        self.storage
+            .write_status(entry.index_addr, TSL_STATUS_NUM, tsl_status_index(status))
     }
 
     /// Erase every sector and reset the database (dangerous, irreversible).
@@ -1070,8 +1080,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         } else {
             let mut time = [F::ERASED_BYTE; MAX_ALIGN];
             end_time.write_le(&mut time, 0);
-            self.storage
-                .write(sec_addr + time_off, &time[..time_len])?;
+            self.storage.write(sec_addr + time_off, &time[..time_len])?;
         }
         let idx_len = layout.uint32_align as usize;
         if idx_len <= 8 {
@@ -1219,11 +1228,8 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         /* write the blob data */
         self.storage.write_align(log_addr, data)?;
         /* write the status by write granularity */
-        self.storage.write_status(
-            idx_addr,
-            TSL_STATUS_NUM,
-            tsl_status_index(TslStatus::Write),
-        )
+        self.storage
+            .write_status(idx_addr, TSL_STATUS_NUM, tsl_status_index(TslStatus::Write))
     }
 
     /// Find the index address to start a by-time scan in one sector
@@ -1281,11 +1287,7 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
     ///
     /// Returns the number of bytes read, which is the smaller of `buf.len()`
     /// and the payload length.
-    pub fn read_blob(
-        &mut self,
-        entry: &TslEntry<T>,
-        buf: &mut [u8],
-    ) -> Result<usize, F::Error> {
+    pub fn read_blob(&mut self, entry: &TslEntry<T>, buf: &mut [u8]) -> Result<usize, F::Error> {
         if entry.log_addr == FAILED_ADDR || entry.log_len == 0 {
             return Ok(0);
         }
@@ -1468,7 +1470,12 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
                 let next = if forward {
                     next_tsl_addr(index, self.sec_end_idx, layout.log_idx_size)
                 } else {
-                    prev_tsl_addr(index, self.sec_addr, layout.log_idx_size, layout.sec_hdr_size)
+                    prev_tsl_addr(
+                        index,
+                        self.sec_addr,
+                        layout.log_idx_size,
+                        layout.sec_hdr_size,
+                    )
                 };
                 match next {
                     Some(next) => self.next_index = next,

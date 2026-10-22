@@ -72,7 +72,12 @@ const IMAGE_ERR_IO: i32 = 255;
 /// `kv_value(seed, i, len)`: `buf[j] = (seed + i*31 + j*7) & 0xFF`.
 fn kv_value(seed: u32, i: u32, len: usize) -> Vec<u8> {
     (0..len)
-        .map(|j| (seed.wrapping_add(i.wrapping_mul(31)).wrapping_add((j as u32).wrapping_mul(7)) & 0xFF) as u8)
+        .map(|j| {
+            (seed
+                .wrapping_add(i.wrapping_mul(31))
+                .wrapping_add((j as u32).wrapping_mul(7))
+                & 0xFF) as u8
+        })
         .collect()
 }
 
@@ -119,7 +124,6 @@ impl ToolError {
             ToolError::Io(_) => IMAGE_ERR_IO,
         }
     }
-
 }
 
 /// Map the Rust error back to the C `fdb_err_t` the image tool would report.
@@ -225,7 +229,8 @@ fn tsl_status_index(status: TslStatus) -> u32 {
 
 /// Run the deterministic workload on two fresh 16 KiB partitions and return
 /// `(image, summary, kv_stats, ts_stats)`.
-fn build_image<const WG: u32>() -> Result<(Vec<u8>, String, flashdb_sim::Stats, flashdb_sim::Stats), ToolError> {
+fn build_image<const WG: u32>(
+) -> Result<(Vec<u8>, String, flashdb_sim::Stats, flashdb_sim::Stats), ToolError> {
     let cfg = Config::new(SEC_SIZE, PART_SIZE);
 
     /* --- KV partition --- */
@@ -320,8 +325,7 @@ fn read_image_bytes<const WG: u32>(image: &[u8]) -> Result<String, ToolError> {
 // ---------------------------------------------------------------------------
 
 fn load_image_file(path: &str) -> Result<Vec<u8>, ToolError> {
-    let bytes =
-        fs::read(path).map_err(|e| ToolError::Io(format!("cannot read '{path}': {e}")))?;
+    let bytes = fs::read(path).map_err(|e| ToolError::Io(format!("cannot read '{path}': {e}")))?;
     if bytes.len() != IMAGE_SIZE {
         return Err(ToolError::Io(format!(
             "'{path}' is {} bytes, expected {}",

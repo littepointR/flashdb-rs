@@ -159,10 +159,7 @@ macro_rules! tsdb_parity_for_wg {
 
             /// Read the payload of an entry as a decimal timestamp string, like
             /// the upstream `test_fdb_tsl_iter_cb` (`atoi(data)`).
-            fn read_decimal(
-                it: &mut TslIterator<'_, Nor>,
-                entry: &TslEntry<i32>,
-            ) -> i32 {
+            fn read_decimal(it: &mut TslIterator<'_, Nor>, entry: &TslEntry<i32>) -> i32 {
                 let mut buf = [0u8; LOG_BUF_LEN];
                 let n = it.read_blob(entry, &mut buf).unwrap();
                 let text = core::str::from_utf8(&buf[..n]).unwrap();
@@ -261,9 +258,7 @@ macro_rules! tsdb_parity_for_wg {
                     assert_eq!(entry.time, data);
                     times.push(entry.time);
                 }
-                let expected: Vec<i32> = (1..=count() as i32)
-                    .map(|i| TEST_TIME_STEP * i)
-                    .collect();
+                let expected: Vec<i32> = (1..=count() as i32).map(|i| TEST_TIME_STEP * i).collect();
                 assert_eq!(times, expected);
             }
 
@@ -292,8 +287,7 @@ macro_rules! tsdb_parity_for_wg {
                 append_decimal(&mut db, count());
 
                 let mut db = reboot(db);
-                let user_status_count =
-                    (count() / 2) as usize; // TEST_TS_USER_STATUS1_COUNT
+                let user_status_count = (count() / 2) as usize; // TEST_TS_USER_STATUS1_COUNT
                 let deleted_count = (count() - count() / 2) as usize;
                 let to = count() as i32 * TEST_TIME_STEP;
 
@@ -363,13 +357,7 @@ macro_rules! tsdb_parity_for_wg {
             /// `test_tsdb_data_by_time`: query `[from, to]`, compute the number
             /// of even timestamps the reference should return, and verify both
             /// the count and the timestamps (ascending or descending range).
-            fn data_by_time(
-                db: &mut Tsdb<Nor>,
-                from: i32,
-                to: i32,
-                db_start: i32,
-                db_end: i32,
-            ) {
+            fn data_by_time(db: &mut Tsdb<Nor>, from: i32, to: i32, db_start: i32, db_end: i32) {
                 let mut cur_time = from;
                 let mut valid_to = to;
                 if from <= to {
@@ -523,23 +511,83 @@ macro_rules! tsdb_parity_for_wg {
                 data_by_time(&mut db, db_end + 2, db_end + 1, db_start, db_end);
 
                 // first sector
-                data_by_time(&mut db, secs[0].start_time - 1, secs[0].end_time, db_start, db_end);
-                data_by_time(&mut db, secs[0].start_time, secs[0].end_time, db_start, db_end);
-                data_by_time(&mut db, secs[0].start_time, secs[0].end_time + 1, db_start, db_end);
-                data_by_time(&mut db, secs[0].end_time + 1, secs[0].start_time, db_start, db_end);
-                data_by_time(&mut db, secs[0].end_time, secs[0].start_time, db_start, db_end);
-                data_by_time(&mut db, secs[0].end_time, secs[0].start_time - 1, db_start, db_end);
+                data_by_time(
+                    &mut db,
+                    secs[0].start_time - 1,
+                    secs[0].end_time,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    secs[0].start_time,
+                    secs[0].end_time,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    secs[0].start_time,
+                    secs[0].end_time + 1,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    secs[0].end_time + 1,
+                    secs[0].start_time,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    secs[0].end_time,
+                    secs[0].start_time,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    secs[0].end_time,
+                    secs[0].start_time - 1,
+                    db_start,
+                    db_end,
+                );
 
                 // last used sector: the first sector with end_time == 0
                 let last_idx = secs.iter().position(|s| s.end_time == 0).unwrap();
                 assert!(last_idx >= 3, "last sector index {last_idx} must be >= 3");
                 let last = secs[last_idx];
-                data_by_time(&mut db, last.start_time - 1, last.end_time, db_start, db_end);
+                data_by_time(
+                    &mut db,
+                    last.start_time - 1,
+                    last.end_time,
+                    db_start,
+                    db_end,
+                );
                 data_by_time(&mut db, last.start_time, last.end_time, db_start, db_end);
-                data_by_time(&mut db, last.start_time, last.end_time + 1, db_start, db_end);
-                data_by_time(&mut db, last.end_time + 1, last.start_time, db_start, db_end);
+                data_by_time(
+                    &mut db,
+                    last.start_time,
+                    last.end_time + 1,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    last.end_time + 1,
+                    last.start_time,
+                    db_start,
+                    db_end,
+                );
                 data_by_time(&mut db, last.end_time, last.start_time, db_start, db_end);
-                data_by_time(&mut db, last.end_time, last.start_time - 1, db_start, db_end);
+                data_by_time(
+                    &mut db,
+                    last.end_time,
+                    last.start_time - 1,
+                    db_start,
+                    db_end,
+                );
 
                 // less than one sector
                 data_by_time(
@@ -557,8 +605,20 @@ macro_rules! tsdb_parity_for_wg {
                     db_end,
                 );
                 // equal to one sector
-                data_by_time(&mut db, secs[0].start_time, secs[0].end_time, db_start, db_end);
-                data_by_time(&mut db, secs[0].end_time, secs[0].start_time, db_start, db_end);
+                data_by_time(
+                    &mut db,
+                    secs[0].start_time,
+                    secs[0].end_time,
+                    db_start,
+                    db_end,
+                );
+                data_by_time(
+                    &mut db,
+                    secs[0].end_time,
+                    secs[0].start_time,
+                    db_start,
+                    db_end,
+                );
 
                 // one to two sectors
                 for (a, b) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
@@ -611,10 +671,7 @@ macro_rules! tsdb_parity_for_wg {
                         .unwrap();
 
                         assert_eq!(db.query_count(2, 6, TslStatus::Write).unwrap(), 3);
-                        assert_eq!(
-                            db.query_count(0, i32::MAX, TslStatus::Write).unwrap(),
-                            3
-                        );
+                        assert_eq!(db.query_count(0, i32::MAX, TslStatus::Write).unwrap(), 3);
                     })
                     .unwrap()
                     .join()

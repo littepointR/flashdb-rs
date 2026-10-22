@@ -29,7 +29,10 @@ fn config() -> Config {
 fn payload_for(i: i32) -> [u8; 32] {
     let mut data = [0u8; 32];
     for (j, b) in data.iter_mut().enumerate() {
-        *b = ((i as u32 * 13).wrapping_add(0x5A).wrapping_add(j as u32 * 5) & 0xFF) as u8;
+        *b = ((i as u32 * 13)
+            .wrapping_add(0x5A)
+            .wrapping_add(j as u32 * 5)
+            & 0xFF) as u8;
     }
     data
 }
@@ -263,7 +266,10 @@ fn exercise_workload(appends: i32) {
             recovered.committed.last().copied().unwrap_or(0)
         );
     }
-    assert!(crashes > appends as u64 / 4, "too few injected crashes: {crashes}");
+    assert!(
+        crashes > appends as u64 / 4,
+        "too few injected crashes: {crashes}"
+    );
 }
 
 #[test]

@@ -181,7 +181,11 @@ const fn build_crc32_table() -> [u32; 256] {
         let mut crc = i as u32;
         let mut bit = 0;
         while bit < 8 {
-            crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
             bit += 1;
         }
         table[i] = crc;
@@ -203,7 +207,11 @@ const fn build_crc32_table() -> [u32; 16] {
         let mut crc = i as u32;
         let mut bit = 0;
         while bit < 4 {
-            crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                0xEDB8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
             bit += 1;
         }
         table[i] = crc;

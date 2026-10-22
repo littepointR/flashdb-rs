@@ -59,7 +59,8 @@ fn exercise<const WG: u32>() {
     assert_eq!(db.stats().unwrap().key_count >= 3, true);
 
     // defaults + explicit format
-    db.format_with_defaults(&[("fw", b"1.0".as_slice())]).unwrap();
+    db.format_with_defaults(&[("fw", b"1.0".as_slice())])
+        .unwrap();
     let mut db2 = Kvdb::mount(db.into_flash(), cfg()).unwrap();
     let mut buf = [0u8; 16];
     assert_eq!(db2.get(b"fw", &mut buf).unwrap(), Some(3));

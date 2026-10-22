@@ -152,11 +152,7 @@ impl<F: Flash> Storage<F> {
     /// The buffer size is chosen at compile time from the flash write
     /// granularity, so no dynamic memory is needed and the unused branches are
     /// removed by the optimiser for every concrete flash type.
-    pub(crate) fn read_status(
-        &mut self,
-        addr: u32,
-        status_num: usize,
-    ) -> Result<usize, F::Error> {
+    pub(crate) fn read_status(&mut self, addr: u32, status_num: usize) -> Result<usize, F::Error> {
         let wg = F::WRITE_GRAN_BITS;
         let n = status_table_size(status_num, wg);
         if wg <= 32 {

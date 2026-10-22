@@ -1,6 +1,6 @@
 //! KVDB smoke tests: basic CRUD, persistence, GC pressure, recovery.
 
-use flashdb::{Config, Kvdb, KvdbNoCache, KvStatus};
+use flashdb::{Config, KvStatus, Kvdb, KvdbNoCache};
 use flashdb_sim::RamFlash;
 
 const SEC: u32 = 4096;
@@ -53,12 +53,9 @@ fn crud_and_persistence() {
 #[test]
 fn defaults_on_fresh_flash() {
     let flash = flash8();
-    let mut db = Kvdb::mount_with_defaults(
-        flash,
-        cfg(),
-        &[("version", b"1.2.3"), ("boot", b"\x00")],
-    )
-    .unwrap();
+    let mut db =
+        Kvdb::mount_with_defaults(flash, cfg(), &[("version", b"1.2.3"), ("boot", b"\x00")])
+            .unwrap();
     let mut buf = [0u8; 16];
     assert_eq!(db.get(b"version", &mut buf).unwrap(), Some(5));
     assert_eq!(&buf[..5], b"1.2.3");

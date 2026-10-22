@@ -13,7 +13,10 @@ type Nor = RamFlash<16384, 8>;
 fn payload_for(i: i32) -> [u8; 32] {
     let mut data = [0u8; 32];
     for (j, b) in data.iter_mut().enumerate() {
-        *b = ((i as u32 * 13).wrapping_add(0x5A).wrapping_add(j as u32 * 5) & 0xFF) as u8;
+        *b = ((i as u32 * 13)
+            .wrapping_add(0x5A)
+            .wrapping_add(j as u32 * 5)
+            & 0xFF) as u8;
     }
     data
 }
@@ -50,10 +53,7 @@ fn wraps_around_and_keeps_the_live_window() {
     assert_eq!(times(&mut db), expected);
 
     // Iterators and by-time scans agree.
-    let mut reverse: Vec<i32> = db
-        .iter_reverse()
-        .map(|e| e.unwrap().time)
-        .collect();
+    let mut reverse: Vec<i32> = db.iter_reverse().map(|e| e.unwrap().time).collect();
     reverse.reverse();
     assert_eq!(reverse, expected);
     let all: Vec<i32> = db
@@ -101,10 +101,7 @@ fn sector_end_info_tracks_the_ring() {
         assert_eq!(status, &[0x00, 0x00], "sector {sector} end_info[0].status");
     }
     // Sector 0 is currently in use and starts at 925.
-    assert_eq!(
-        i32::from_le_bytes(image[7..11].try_into().unwrap()),
-        925
-    );
+    assert_eq!(i32::from_le_bytes(image[7..11].try_into().unwrap()), 925);
 }
 
 #[test]
@@ -135,7 +132,10 @@ fn full_database_with_rollover_disabled_stays_full() {
     let mut db = mount(flash);
     assert_eq!(times(&mut db), (1..=capacity).collect::<Vec<i32>>());
     assert_eq!(db.last_time(), capacity);
-    assert!(matches!(db.append(capacity + 1, b"x"), Err(Error::SavedFull)));
+    assert!(matches!(
+        db.append(capacity + 1, b"x"),
+        Err(Error::SavedFull)
+    ));
 }
 
 #[test]
@@ -197,10 +197,7 @@ fn by_time_ranges_across_the_ring_wrap() {
                 .filter(|t| *t >= to && *t <= from)
                 .collect()
         };
-        let actual: Vec<i32> = db
-            .iter_by_time(from, to)
-            .map(|e| e.unwrap().time)
-            .collect();
+        let actual: Vec<i32> = db.iter_by_time(from, to).map(|e| e.unwrap().time).collect();
         assert_eq!(actual, expect, "iter_by_time({from}, {to})");
     }
 }

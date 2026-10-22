@@ -202,15 +202,15 @@ macro_rules! kvdb_parity_for_wg {
                         *sector, exp.sector,
                         "record {i} ({name}): sector mismatch (oldest_addr / GC layout)"
                     );
-                    assert_eq!(
-                        value,
-                        &payload(exp),
-                        "record {i} ({name}): value mismatch"
-                    );
+                    assert_eq!(value, &payload(exp), "record {i} ({name}): value mismatch");
                     // Also exercise the random-access read path.
                     let mut buf = value.clone();
                     let n = db.get(exp.name.as_bytes(), &mut buf).unwrap().unwrap();
-                    assert_eq!(&buf[..n], value.as_slice(), "record {i} ({name}): get() mismatch");
+                    assert_eq!(
+                        &buf[..n],
+                        value.as_slice(),
+                        "record {i} ({name}): get() mismatch"
+                    );
                 }
                 db.check().unwrap();
             }
@@ -284,7 +284,11 @@ macro_rules! kvdb_parity_for_wg {
                 let n = db.get(b"kv_blob_test", &mut small).unwrap().unwrap();
                 assert_eq!(n, 3, "get() copies at most buf.len() bytes");
                 let full = db.find(b"kv_blob_test").unwrap().unwrap().value_len;
-                assert_eq!(full as usize, blob2.len(), "find().value_len is the full length");
+                assert_eq!(
+                    full as usize,
+                    blob2.len(),
+                    "find().value_len is the full length"
+                );
 
                 // delete: C uses set_blob(NULL, 0); Rust uses remove().
                 assert!(db.remove(b"kv_blob_test").unwrap());
@@ -454,8 +458,7 @@ macro_rules! kvdb_parity_for_wg {
                 const BIG_FLASH: usize = 32768;
                 type BigNor = RamFlash<BIG_FLASH, $wg>;
 
-                let mut db =
-                    Kvdb::<BigNor>::mount(BigNor::new(SECTOR_SIZE), cfg()).unwrap();
+                let mut db = Kvdb::<BigNor>::mount(BigNor::new(SECTOR_SIZE), cfg()).unwrap();
                 db.format().unwrap();
 
                 let old = phase(&[

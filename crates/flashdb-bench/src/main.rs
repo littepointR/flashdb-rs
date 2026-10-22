@@ -14,11 +14,14 @@
 //!
 //! The JSON is written to `harness/results/rust_wg<NN>_host.json`.
 
-use flashdb::{Config, Error, Flash, Kvdb, KvdbImpl, KvdbNoCache, KvdbSmallCache, Timestamp, Tsdb, TsdbImpl, TslStatus};
+use flashdb::{
+    Config, Error, Flash, Kvdb, KvdbImpl, KvdbNoCache, KvdbSmallCache, Timestamp, Tsdb, TsdbImpl,
+    TslStatus,
+};
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::Instant;
 
 const SEC_SIZE: u32 = 4096;
@@ -114,7 +117,6 @@ impl<const WG: u32> BenchFlash<WG> {
             data: std::vec![0xFFu8; FLASH_SIZE],
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +142,9 @@ impl<const WG: u32> Flash for BenchFlash<WG> {
     #[inline]
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Self::Error> {
         let start = addr as usize;
-        let end = start.checked_add(buf.len()).ok_or(BenchError::OutOfBounds)?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or(BenchError::OutOfBounds)?;
         if end > FLASH_SIZE {
             return Err(BenchError::OutOfBounds);
         }
@@ -154,7 +158,9 @@ impl<const WG: u32> Flash for BenchFlash<WG> {
     #[inline]
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), Self::Error> {
         let start = addr as usize;
-        let end = start.checked_add(buf.len()).ok_or(BenchError::OutOfBounds)?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or(BenchError::OutOfBounds)?;
         if end > FLASH_SIZE {
             return Err(BenchError::OutOfBounds);
         }
@@ -473,9 +479,15 @@ fn kv_snapshot_checksum<F: Flash>(db: &mut KvdbImpl<F, 64>) -> (u32, u32, u64) {
     {
         let mut it = db.iter();
         while let Some(entry) = it.next() {
-            let entry = match entry { Ok(e) => e, Err(_) => panic!("kv snapshot iterator") };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => panic!("kv snapshot iterator"),
+            };
             let mut value = vec![0u8; entry.value_len as usize];
-            let n = match it.read_value(&entry, &mut value) { Ok(n) => n, Err(_) => panic!("kv snapshot read") };
+            let n = match it.read_value(&entry, &mut value) {
+                Ok(n) => n,
+                Err(_) => panic!("kv snapshot read"),
+            };
             value.truncate(n);
             entries.push((entry.name().to_vec(), value));
         }
@@ -502,12 +514,18 @@ fn ts_snapshot_checksum<F: Flash>(db: &mut TsdbImpl<F, i32>) -> (u32, u32, u64) 
     {
         let mut it = db.iter();
         while let Some(entry) = it.next() {
-            let entry = match entry { Ok(e) => e, Err(_) => panic!("ts snapshot iterator") };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => panic!("ts snapshot iterator"),
+            };
             h = fnv_u32(h, entry.status as u32);
             h = fnv_u32(h, entry.time.to_i64() as u32);
             h = fnv_u32(h, entry.log_len);
             let mut buf = vec![0u8; entry.log_len as usize];
-            let n = match it.read_blob(&entry, &mut buf) { Ok(n) => n, Err(_) => panic!("ts snapshot read") };
+            let n = match it.read_blob(&entry, &mut buf) {
+                Ok(n) => n,
+                Err(_) => panic!("ts snapshot read"),
+            };
             h = fnv_bytes(h, &buf[..n]);
             count += 1;
             payload_bytes += n as u64;
@@ -540,7 +558,6 @@ where
     let mut first_flash: Option<CounterSnapshot> = None;
     let mut flash_consistent = true;
     for _ in 0..runs {
-        
         let flash = BenchFlash::<WG>::new();
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv mount");
         setup(&mut db);
@@ -606,7 +623,6 @@ where
     let mut first_flash: Option<CounterSnapshot> = None;
     let mut flash_consistent = true;
     for _ in 0..runs {
-        
         let flash = BenchFlash::<WG>::new();
         let mut db =
             Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("ts mount");
@@ -666,7 +682,6 @@ fn bench_kv_mount<const WG: u32>(runs: u32) -> Scenario {
     let mut entries = 0u32;
     let mut value_bytes = 0u64;
     for _ in 0..runs {
-        
         let flash = BenchFlash::<WG>::new();
         let mut db = Kvdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE)).expect("kv mount");
         setup_32_keys(&mut db);
@@ -732,7 +747,9 @@ fn setup_32_keys<F: Flash>(db: &mut KvdbImpl<F, 64>) {
     for i in 0..32u32 {
         let klen = key_num(b"key", i, &mut key);
         kv_value(0x33, i, 32, &mut value);
-        if db.set(&key[..klen], &value).is_err() { panic!("setup set"); }
+        if db.set(&key[..klen], &value).is_err() {
+            panic!("setup set");
+        }
     }
 }
 
@@ -798,7 +815,8 @@ fn kv_get_hot_body<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) -> BodyOut {
         }
         out.ops += 1;
     }
-    out.extra.push(("sum_returned_bytes", ExtraVal::U(sum_bytes)));
+    out.extra
+        .push(("sum_returned_bytes", ExtraVal::U(sum_bytes)));
     out
 }
 
@@ -815,7 +833,8 @@ fn kv_get_miss_body<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) -> BodyOut {
         }
         out.ops += 1;
     }
-    out.extra.push(("sum_returned_bytes", ExtraVal::U(sum_bytes)));
+    out.extra
+        .push(("sum_returned_bytes", ExtraVal::U(sum_bytes)));
     out
 }
 
@@ -869,7 +888,8 @@ fn kv_iterate_body<const WG: u32>(db: &mut Kvdb<BenchFlash<WG>>) -> BodyOut {
         last_sum = sum;
     }
     out.ops = 100;
-    out.extra.push(("entries_per_iter", ExtraVal::U(last_count)));
+    out.extra
+        .push(("entries_per_iter", ExtraVal::U(last_count)));
     out.extra
         .push(("sum_value_len_per_iter", ExtraVal::U(last_sum)));
     out
@@ -953,10 +973,7 @@ fn ts_append_body<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>) -> BodyOut {
     out
 }
 
-fn ts_rollover_body<const WG: u32>(
-    db: &mut Tsdb<BenchFlash<WG>>,
-    capacity: u32,
-) -> BodyOut {
+fn ts_rollover_body<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>, capacity: u32) -> BodyOut {
     let mut out = BodyOut::default();
     let mut ok = 0u64;
     let mut calls = 0u64;
@@ -1020,7 +1037,8 @@ fn ts_iter_body<const WG: u32>(db: &mut Tsdb<BenchFlash<WG>>, reverse: bool) -> 
         last_sum = sum;
     }
     out.ops = 20;
-    out.extra.push(("entries_per_iter", ExtraVal::U(last_count)));
+    out.extra
+        .push(("entries_per_iter", ExtraVal::U(last_count)));
     out.extra
         .push(("sum_payload_len_per_iter", ExtraVal::U(last_sum)));
     out
@@ -1065,7 +1083,8 @@ fn ts_by_time_body_mode<const WG: u32>(
         payload_sum += sum;
     }
     out.ops = TS_RANGE_QUERIES as u64;
-    out.extra.push(("queries", ExtraVal::U(TS_RANGE_QUERIES as u64)));
+    out.extra
+        .push(("queries", ExtraVal::U(TS_RANGE_QUERIES as u64)));
     out.extra.push(("sum_matches", ExtraVal::U(total)));
     out.extra
         .push(("sum_payload_len", ExtraVal::U(payload_sum)));
@@ -1083,14 +1102,13 @@ fn ts_query_count_body<const WG: u32>(
     let mut state = TS_LCG_SEED;
     for _ in 0..TS_RANGE_QUERIES {
         let (from, to) = ts_range_query(&mut state);
-        let count = db
-            .query_count(from, to, TslStatus::Write)
-            .unwrap_or(0) as u32;
+        let count = db.query_count(from, to, TslStatus::Write).unwrap_or(0) as u32;
         p.push(count);
         total += count as u64;
     }
     out.ops = TS_RANGE_QUERIES as u64;
-    out.extra.push(("queries", ExtraVal::U(TS_RANGE_QUERIES as u64)));
+    out.extra
+        .push(("queries", ExtraVal::U(TS_RANGE_QUERIES as u64)));
     out.extra.push(("sum_count", ExtraVal::U(total)));
     out
 }
@@ -1132,10 +1150,8 @@ fn run_kv_scenarios<const WG: u32>(runs: u32) -> Vec<Scenario> {
             let mut got = [0u8; 32];
             kv_value(0x22, 999, 32, &mut expect);
             let n = db.get(b"counter", &mut got).unwrap_or(None);
-            out.extra.push((
-                "final_value_len_ok",
-                ExtraVal::B(n == Some(expect.len())),
-            ));
+            out.extra
+                .push(("final_value_len_ok", ExtraVal::B(n == Some(expect.len()))));
             out.extra.push((
                 "final_value_matches",
                 ExtraVal::B(n == Some(expect.len()) && got == expect),
@@ -1292,7 +1308,6 @@ fn bench_ts_mount<const WG: u32>(runs: u32) -> Scenario {
     let mut checksum = 0u32;
     let mut populated = 0u32;
     for _ in 0..runs {
-        
         let flash = BenchFlash::<WG>::new();
         let mut db =
             Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), TS_MAX_LOG_LEN).expect("ts mount");
@@ -1412,7 +1427,10 @@ fn main() {
             }
             "--runs" => {
                 i += 1;
-                runs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_RUNS);
+                runs = args
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(DEFAULT_RUNS);
             }
             "--no-ts" => with_ts = false,
             "--with-ts" => with_ts = true,

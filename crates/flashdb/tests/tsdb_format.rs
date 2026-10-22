@@ -16,7 +16,12 @@ type Nor = RamFlash<16384, 8>;
 
 fn payload(i: usize, len: usize) -> Vec<u8> {
     (0..len)
-        .map(|j| ((0x5Au32.wrapping_add(i as u32 * 13).wrapping_add(j as u32 * 5)) & 0xFF) as u8)
+        .map(|j| {
+            ((0x5Au32
+                .wrapping_add(i as u32 * 13)
+                .wrapping_add(j as u32 * 5))
+                & 0xFF) as u8
+        })
         .collect()
 }
 
@@ -64,7 +69,10 @@ fn mount_on_erased_flash_formats_every_sector() {
         let base = sector * SEC_SIZE as usize;
         // status table: 3 bytes, EMPTY (1) clears the first write granule
         assert_eq!(data[base + SEC_STATUS_OFF], 0x00, "sector {sector} status");
-        assert_eq!(&data[base + SEC_STATUS_OFF + 1..base + SEC_MAGIC_OFF], &[0xFF, 0xFF]);
+        assert_eq!(
+            &data[base + SEC_STATUS_OFF + 1..base + SEC_MAGIC_OFF],
+            &[0xFF, 0xFF]
+        );
         // magic word `TSL0` little endian, padded to 4 bytes with 0xFF
         assert_eq!(
             &data[base + SEC_MAGIC_OFF..base + SEC_START_TIME_OFF],
@@ -105,7 +113,10 @@ fn append_writes_c_header_layout() {
     // index record at the top of the sector
     let idx = base + SEC_HDR_SIZE;
     // status PRE_WRITE (chunk 0) then WRITE (chunk 1)
-    assert_eq!(&image[idx + IDX_STAT_OFF..idx + IDX_STAT_OFF + 5], &[0x00, 0x00, 0xFF, 0xFF, 0xFF]);
+    assert_eq!(
+        &image[idx + IDX_STAT_OFF..idx + IDX_STAT_OFF + 5],
+        &[0x00, 0x00, 0xFF, 0xFF, 0xFF]
+    );
     assert_eq!(get_i32(image, idx + IDX_TIME_OFF), 1000);
     assert_eq!(get_u32(image, idx + IDX_LOG_LEN_OFF), 32);
     let log_addr = get_u32(image, idx + IDX_LOG_ADDR_OFF);
@@ -145,7 +156,11 @@ fn append_rejects_bad_input() {
 
 #[test]
 fn mount_rejects_max_len_not_below_sector_size() {
-    let err = Tsdb::mount(Nor::new(SEC_SIZE), Config::new(SEC_SIZE, MAX_SIZE), SEC_SIZE);
+    let err = Tsdb::mount(
+        Nor::new(SEC_SIZE),
+        Config::new(SEC_SIZE, MAX_SIZE),
+        SEC_SIZE,
+    );
     assert!(matches!(err, Err(Error::InvalidConfig)));
 }
 
@@ -170,7 +185,10 @@ fn fills_until_saved_full_with_rollover_disabled() {
 
     // max_blob_count() assumes every log has the maximum payload size:
     // (4096 - 44) / (20 + 256) = 14 per sector, 4 sectors
-    assert_eq!(db.max_blob_count(), 4 * ((SEC_SIZE as usize - 44) / (20 + 256)));
+    assert_eq!(
+        db.max_blob_count(),
+        4 * ((SEC_SIZE as usize - 44) / (20 + 256))
+    );
     // With 32-byte payloads a sector holds (4096 - 44) / (20 + 32) = 77 logs.
     let expected_entries = 4 * 77;
 
@@ -257,7 +275,10 @@ fn end_info_is_written_when_a_sector_is_sealed() {
     let image = flash.data();
     let base = 0usize;
     // sector store status now FULL (3): three granules cleared
-    assert_eq!(&image[base + SEC_STATUS_OFF..base + SEC_STATUS_OFF + 3], &[0, 0, 0]);
+    assert_eq!(
+        &image[base + SEC_STATUS_OFF..base + SEC_STATUS_OFF + 3],
+        &[0, 0, 0]
+    );
     // end_info[0]: time = last timestamp of the sealed sector, index = last index
     assert_eq!(get_i32(image, base + SEC_END0_TIME_OFF), 77);
     assert_eq!(
@@ -265,14 +286,22 @@ fn end_info_is_written_when_a_sector_is_sealed() {
         (SEC_HDR_SIZE + 76 * IDX_SIZE) as u32
     );
     // end_info status: PRE_WRITE granule then WRITE granule
-    assert_eq!(&image[base + SEC_END0_STAT_OFF..base + SEC_END0_STAT_OFF + 2], &[0, 0]);
+    assert_eq!(
+        &image[base + SEC_END0_STAT_OFF..base + SEC_END0_STAT_OFF + 2],
+        &[0, 0]
+    );
     // end_info[1] is untouched
-    assert!(image[base + SEC_END1_TIME_OFF..base + SEC_END1_STAT_OFF + 5]
-        .iter()
-        .all(|b| *b == 0xFF));
+    assert!(
+        image[base + SEC_END1_TIME_OFF..base + SEC_END1_STAT_OFF + 5]
+            .iter()
+            .all(|b| *b == 0xFF)
+    );
     // sector 1 is in use and starts at timestamp 78
     let base1 = SEC_SIZE as usize;
-    assert_eq!(&image[base1 + SEC_STATUS_OFF..base1 + SEC_STATUS_OFF + 2], &[0, 0]);
+    assert_eq!(
+        &image[base1 + SEC_STATUS_OFF..base1 + SEC_STATUS_OFF + 2],
+        &[0, 0]
+    );
     assert_eq!(get_i32(image, base1 + SEC_START_TIME_OFF), 78);
 }
 
@@ -359,15 +388,18 @@ fn remount_after_clean_does_not_keep_old_data() {
 #[test]
 fn works_with_write_granularity_one() {
     type Nor1 = RamFlash<16384, 1>;
-    let mut db: Tsdb<Nor1> =
-        Tsdb::mount(Nor1::new(SEC_SIZE), Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    let mut db: Tsdb<Nor1> = Tsdb::mount(
+        Nor1::new(SEC_SIZE),
+        Config::new(SEC_SIZE, MAX_SIZE),
+        MAX_LEN,
+    )
+    .unwrap();
     for i in 0..120 {
         db.append(1 + i, &payload(i as usize, 32)).unwrap();
     }
     assert_eq!(db.iter().count(), 120);
     let flash = db.into_flash();
-    let mut db: Tsdb<Nor1> =
-        Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    let mut db: Tsdb<Nor1> = Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
     assert_eq!(db.last_time(), 120);
     assert_eq!(db.iter().count(), 120);
     let mut it = db.iter();
@@ -381,15 +413,18 @@ fn works_with_write_granularity_one() {
 #[test]
 fn works_with_write_granularity_32() {
     type Nor32 = RamFlash<16384, 32>;
-    let mut db: Tsdb<Nor32> =
-        Tsdb::mount(Nor32::new(SEC_SIZE), Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    let mut db: Tsdb<Nor32> = Tsdb::mount(
+        Nor32::new(SEC_SIZE),
+        Config::new(SEC_SIZE, MAX_SIZE),
+        MAX_LEN,
+    )
+    .unwrap();
     for i in 0..100 {
         db.append(1 + i, &payload(i as usize, 32)).unwrap();
     }
     assert_eq!(db.iter().count(), 100);
     let flash = db.into_flash();
-    let mut db: Tsdb<Nor32> =
-        Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    let mut db: Tsdb<Nor32> = Tsdb::mount(flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
     assert_eq!(db.last_time(), 100);
     assert_eq!(db.iter().count(), 100);
 }
@@ -414,7 +449,10 @@ fn works_with_64bit_timestamps() {
     // index record: 24 bytes, status 5 bytes then padding, time at +8
     let idx = 56usize;
     assert_eq!(&image[idx..idx + 5], &[0x00, 0x00, 0xFF, 0xFF, 0xFF]);
-    assert_eq!(i64::from_le_bytes(image[idx + 8..idx + 16].try_into().unwrap()), BIG);
+    assert_eq!(
+        i64::from_le_bytes(image[idx + 8..idx + 16].try_into().unwrap()),
+        BIG
+    );
     assert_eq!(get_u32(image, idx + 16), 32);
     assert_eq!(get_u32(image, idx + 20), SEC_SIZE - 32);
 
@@ -431,8 +469,12 @@ fn works_with_64bit_timestamps() {
 
     // A 64-bit database also works at bit-level write granularity.
     type Nor1 = RamFlash<16384, 1>;
-    let mut db: Tsdb64<Nor1> =
-        Tsdb64::mount(Nor1::new(SEC_SIZE), Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
+    let mut db: Tsdb64<Nor1> = Tsdb64::mount(
+        Nor1::new(SEC_SIZE),
+        Config::new(SEC_SIZE, MAX_SIZE),
+        MAX_LEN,
+    )
+    .unwrap();
     for i in 0..120 {
         db.append(BIG + i as i64, &payload(i as usize, 32)).unwrap();
     }
@@ -467,13 +509,7 @@ fn mount_into_roundtrip() {
 
     // Re-mount through the placement API from the same flash image.
     let mut slot = MaybeUninit::<Tsdb<Nor>>::uninit();
-    Tsdb::mount_into(
-        &mut slot,
-        flash,
-        Config::new(SEC_SIZE, MAX_SIZE),
-        MAX_LEN,
-    )
-    .unwrap();
+    Tsdb::mount_into(&mut slot, flash, Config::new(SEC_SIZE, MAX_SIZE), MAX_LEN).unwrap();
     // SAFETY: `mount_into` succeeded.
     let mut db = unsafe { slot.assume_init() };
     assert_eq!(db.last_time(), 1001);
