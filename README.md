@@ -95,6 +95,20 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
 | `harness/SCENARIOS.md` | the normative benchmark protocol shared by C and Rust |
 | `reference/FlashDB` | upstream clone used for differential testing, fetched by script (not part of the crate) |
 
+## Real-hardware test
+
+`harness/firmware/u545re/` runs the crate on a **NUCLEO-U545RE-Q**
+(STM32U545RE, Cortex-M33): the same KVDB+TSDB workload as the QEMU firmware,
+but on silicon, with a RAM NOR simulator, DWT cycle counters and a RAM result
+buffer read back over SWD. See
+[`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md).
+
+Status at bring-up: the harness builds and the image is verified, but the
+on-board ST-LINK/V3 firmware (V3J17M10) cannot program STM32U5 — every flash
+attempt stalls the probe — so the run is blocked on a probe firmware update
+(or an alternative probe). The default QEMU firmware and the library are
+unaffected.
+
 ## Compatibility
 
 For the same sector size, write granularity and timestamp width, the on-flash
