@@ -1,0 +1,14 @@
+FlashDB-rs
+Copyright (c) 2026 littepoint
+
+This project is an independent Rust implementation of the on-flash format and
+behaviour of FlashDB:
+
+    FlashDB - https://github.com/armink/FlashDB
+    Copyright (c) 2020 Armink <armink.ztl@gmail.com>
+    Licensed under the Apache License, Version 2.0.
+
+FlashDB itself is not included in this repository. The C sources are fetched by
+scripts/fetch_reference.sh and compiled unmodified to provide the differential
+reference used by the tests and benchmarks (byte-identical flash images,
+behavioural parity, ROM/RAM measurements).
