@@ -1,0 +1,2 @@
+RESULT kind=endurance pe_cycles=10259 programs=338320 elapsed_cycles=480223433 budget_cycles=480000000 checksum=0x7d7afb78 errors=0 verify_ok=1 erased_ok=1 rc=0
+BOARD core_hz=4000000 acr=0x00000000 nssr=0x00000000 nscr=0x40000000 eccr=0x00000000 stack=152 stack_limit=8192 last_nssr=0x00000000

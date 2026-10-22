@@ -8,27 +8,27 @@
 
 metric                          C FlashDB           Rust        Rust vs C
 --------------------------    -----------    -----------    -------------
-ROM (text+rodata+data) B            13360          13332       -28 (  -0.2%)
+ROM (text+rodata+data) B            13360          13340       -20 (  -0.1%)
 static RAM (data+bss) B              1072            640      -432 ( -40.3%)
-stack high-water B                   1240           1072      -168 ( -13.5%)
-static+stack RAM B                   2312           1712      -600 ( -26.0%)
-cycles mount                       521632         275050   -246582 ( -47.3%)
-cycles KV                        34398930       21910833 -12488097 ( -36.3%)
-cycles TS                          391359         348295    -43064 ( -11.0%)
-cycles rollover                   2554342        2092410   -461932 ( -18.1%)
-cycles total                     38160952       24949003 -13211949 ( -34.6%)
+stack high-water B                   1240           1080      -160 ( -12.9%)
+static+stack RAM B                   2312           1720      -592 ( -25.6%)
+cycles mount                       521628         275020   -246608 ( -47.3%)
+cycles KV                        34398794       22014556 -12384238 ( -36.0%)
+cycles TS                          391359         347488    -43871 ( -11.2%)
+cycles rollover                   2554345        2087865   -466480 ( -18.3%)
+cycles total                     38160894       25047330 -13113564 ( -34.4%)
 
 -- acceptance --
   [PASS] workload results identical to C: 21 fields, checksums included
-  [PASS] ROM (text+rodata+data) B at least as good as C: 13332 vs 13360
+  [PASS] ROM (text+rodata+data) B at least as good as C: 13340 vs 13360
   [PASS] static RAM (data+bss) B at least as good as C: 640 vs 1072
-  [PASS] stack high-water B at least as good as C: 1072 vs 1240
-  [PASS] static+stack RAM B at least as good as C: 1712 vs 2312
-  [PASS] cycles mount at least as good as C: 275050 vs 521632
-  [PASS] cycles KV at least as good as C: 21910833 vs 34398930
-  [PASS] cycles TS at least as good as C: 348295 vs 391359
-  [PASS] cycles rollover at least as good as C: 2092410 vs 2554342
-  [PASS] cycles total at least as good as C: 24949003 vs 38160952
+  [PASS] stack high-water B at least as good as C: 1080 vs 1240
+  [PASS] static+stack RAM B at least as good as C: 1720 vs 2312
+  [PASS] cycles mount at least as good as C: 275020 vs 521628
+  [PASS] cycles KV at least as good as C: 22014556 vs 34398794
+  [PASS] cycles TS at least as good as C: 347488 vs 391359
+  [PASS] cycles rollover at least as good as C: 2087865 vs 2554345
+  [PASS] cycles total at least as good as C: 25047330 vs 38160894
   [PASS] both images report the same clock: C=4000000 Rust=4000000
 
 VERDICT: PASS -- on identical silicon the Rust image is at least as good

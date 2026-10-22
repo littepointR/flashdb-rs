@@ -102,8 +102,10 @@ See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
 
 `harness/firmware/u545re/` runs the crate on a **NUCLEO-U545RE-Q**
 (STM32U545RE, Cortex-M33): the same KVDB+TSDB workload as the QEMU firmware,
-but on silicon, with a RAM NOR simulator, DWT cycle counters and a RAM result
-buffer read back over SWD. See
+but on silicon, with DWT cycle counters and a RAM result buffer read back over
+SWD. The acceptance workload uses the RAM NOR simulator for C/Rust comparison;
+two further images drive the **real STM32U5 internal flash controller** for
+endurance and long-run tests. See
 [`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md).
 
 Verified on silicon: the firmware completes with `rc=0`, both `RESULT` lines are
@@ -111,15 +113,22 @@ byte-identical over repeated runs, and all workload checksums
 (`kv_checksum`, `kv_iter_checksum`, `ts_checksum`) match the QEMU Cortex-M3
 baseline exactly. The C reference has the same board backend, so the comparison
 is like-for-like on identical silicon, and **the acceptance now passes in both
-the stable and the nightly `size` build**: ROM 13 332 B / 13 296 B vs C 13 360 B,
-stack 1 072 B vs 1 240 B, static RAM 640 B vs 1 072 B, and every workload phase
-is faster than C (total CPU −34.6 %; the CPU-fast `release` profile is −43.0 %
+the stable and the nightly `size` build**: ROM 13 340 B / 13 304 B vs C 13 360 B,
+stack 1 080 B vs 1 240 B, static RAM 640 B vs 1 072 B, and every workload phase
+is faster than C (total CPU −34.4 %; the CPU-fast `release` profile is −43.0 %
 but larger ROM). The board run also covers **TSDB rollover** (1 200 appends past
 capacity, live-window/remount/NOR-safety checks) and proves the C and Rust
 images leave **byte-identical flash partitions**. Flashing uses **probe-rs**,
 which programs the STM32U5 independently of the probe's own flash loader; the
 earlier OpenOCD/pyOCD probe hang does not apply to that path, and no ST-LINK
-firmware update was needed. Full tables, reproduction commands and the exact
+firmware update was needed.
+
+Real internal flash is exercised too: `run_flash_tests.ps1 -Test endurance` ran
+**10 259 page erase/program cycles** on one STM32U5 page with per-cycle read-back
+and full-page erased verification (338 320 quad-words ≈ 2.7 MB programmed, 0
+errors), and `-Test longrun` ran the real KVDB+TSDB on internal flash for 60 s
+(65 rounds, 2 112 KV sets, 3 120 TS appends, 1 038 sector erases, 16+16 verified
+remounts, 0 errors). Full tables, reproduction commands and the exact
 acceptance configuration:
 [`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md); test
 inventory and coverage: [`docs/TESTING.md`](docs/TESTING.md).
@@ -148,6 +157,8 @@ C harness:
 ```sh
 scripts/fetch_reference.sh               # clone FlashDB 2.2.x into reference/FlashDB
 cargo test -p flashdb --release          # unit + smoke + parity tests
+cargo test -p flashdb --release --test long_run -- --ignored   # long-run/large-data soak
+cargo doc --workspace --no-deps          # API documentation -> target/doc/flashdb
 cargo build -p flashdb --target thumbv7m-none-eabi --release   # no_std build
 
 scripts/c_bench.sh                       # C reference benchmarks -> harness/results
@@ -179,7 +190,7 @@ simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS
 
 | metric (Cortex-M3 QEMU, same workload) | C FlashDB | Rust |
 |---|---:|---:|
-| ROM (`-Os` vs `-z` + `small-crc` + `-InlineThreshold 50`) | 11 408 B | 11 624 B (+1.9 %); on silicon **13 332 B vs C 13 360 B (parity)** |
+| ROM (`-Os` vs `-z` + `small-crc` + `-InlineThreshold 50`) | 11 408 B | 11 632 B (+2.0 %); on silicon **13 340 B vs C 13 360 B (parity)** |
 | static RAM | 1 064 B | **624 B** |
 | stack high-water | 1 192 B | **1 008 B** |
 | static + stack RAM | 2 256 B | **1 632 B** |
@@ -190,8 +201,8 @@ All scenarios produce identical logical checksums, and Rust-written and
 C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. On the real
 board the C-vs-Rust acceptance passes every check (ROM, static RAM, stack,
 static+stack, all five cycle phases, 21 logical fields, both raw image
-checksums); the QEMU harness image is still +216 B ROM because of its different
-rodata/code split, while the board image is −64 B. The optimisation record and
+checksums); the QEMU harness image is still +224 B ROM because of its different
+rodata/code split, while the board image is −56 B. The optimisation record and
 the remaining optional levers are in `docs/OPTIMIZATION.md`.
 
 Two build options matter for the size/CPU trade-off:

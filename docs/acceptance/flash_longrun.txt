@@ -1,0 +1,2 @@
+RESULT kind=longrun rounds=65 kv_sets=2112 ts_appends=3120 ts_time=4120 query_count=192 kv_remounts=16 ts_remounts=16 elapsed_cycles=242358770 budget_cycles=240000000 checksum=0xf0f76d85 errors=0 verify_ok=1 rc=0
+BOARD core_hz=4000000 kv_erases=497 ts_erases=541 stack=3440 stack_limit=8192

@@ -14,15 +14,15 @@ on the same MCU; 11 acceptance checks, exit status 0):
 
 | metric | C FlashDB | Rust (final config) | delta |
 |---|---:|---:|---:|
-| ROM (text+rodata+data) | 13 360 B | **13 296 B** | **−64 B (−0.5 %)** |
+| ROM (text+rodata+data) | 13 360 B | **13 304 B** | **−56 B (−0.4 %)** |
 | static RAM (data+bss) | 1 072 B | **640 B** | −432 B (−40.3 %) |
-| stack high-water | 1 240 B | **1 072 B** | −168 B (−13.5 %) |
-| static + stack RAM | 2 312 B | **1 712 B** | −600 B (−26.0 %) |
-| cycles mount | 521 636 | **275 021** | −47.3 % |
-| cycles KV (set/update/churn/get/iterate) | 34 398 948 | **21 980 693** | −36.1 % |
-| cycles TS (append/iterate) | 391 359 | **348 888** | −10.9 % |
-| cycles rollover (1 200 appends + remount) | 2 554 342 | **2 095 317** | −18.0 % |
-| cycles total | 38 161 038 | **25 022 334** | −34.4 % |
+| stack high-water | 1 240 B | **1 080 B** | −160 B (−12.9 %) |
+| static + stack RAM | 2 312 B | **1 720 B** | −592 B (−25.6 %) |
+| cycles mount | 521 628 | **274 982** | −47.3 % |
+| cycles KV (set/update/churn/get/iterate) | 34 398 791 | **21 780 634** | −36.7 % |
+| cycles TS (append/iterate) | 391 386 | **347 267** | −11.3 % |
+| cycles rollover (1 200 appends + remount) | 2 554 303 | **2 086 645** | −18.3 % |
+| cycles total | 38 160 832 | **24 811 950** | −35.0 % |
 
 All 21 logical `RESULT` fields are identical (workload counts/checksums,
 rollover window/erases/recovery, both raw-partition FNV checksums, `rc`), and
@@ -37,7 +37,7 @@ Final configuration (all reproducible from the repo):
 * `-C llvm-args=-inline-threshold=50` (see §2 — the decisive build knob),
 * `board-u545` firmware with the RAM NOR simulator (the workload is C-identical).
 
-The ROM win comes from `.text` still being larger than C's (12 444 B vs
+The ROM win comes from `.text` still being larger than C's (12 452 B vs
 11 168 B) being offset by the smaller `.rodata` (852 B vs 2 136 B: 64-byte
 `small-crc` table vs C's 1 KiB table, and shorter label strings). Stack and CPU
 are now clearly ahead.

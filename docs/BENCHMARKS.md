@@ -93,29 +93,29 @@ use the acceptance configuration: `small-crc` plus
 
 | metric | C FlashDB (-Os) | Rust `opt-level="s"` | Rust `opt-level="z"` |
 |---|---:|---:|---:|
-| `.text` | 9 720 B | 12 836 B | 11 116 B |
+| `.text` | 9 720 B | 12 844 B | 11 124 B |
 | `.rodata` | 1 632 B | 508 B | 508 B |
 | `.data` | 56 B | 0 | 0 |
-| **ROM total** | **11 408 B** | **13 344 B** (+17%) | **11 624 B** (+1.9%) |
+| **ROM total** | **11 408 B** | **13 352 B** (+17%) | **11 632 B** (+2.0%) |
 | `.bss` (static DB RAM) | 1 008 B | 624 B | 624 B |
 | **static RAM** | **1 064 B** | **624 B** (−41%) | **624 B** (−41%) |
-| stack high-water | 1 192 B | **1 008 B** (−15%) | **1 008 B** (−15%) |
-| **static + stack RAM** | **2 256 B** | **1 632 B** (−28%) | **1 632 B** (−28%) |
+| stack high-water | 1 192 B | **1 016 B** (−15%) | **1 016 B** (−15%) |
+| **static + stack RAM** | **2 256 B** | **1 640 B** (−27%) | **1 640 B** (−27%) |
 | workload checksums | KV `0x4b3486a4`, TS `0x10d90680` | identical | identical |
 
 Per-phase stack high-water (diagnostic builds; `--phases`, threshold-50 codegen):
 
 | phase | C | Rust `-s` | Rust `-z` |
 |---|---:|---:|---:|
-| mount/init | 752 B | 320 B | 360 B |
-| KV set | 736 B | 608 B | 688 B |
-| KV get | 720 B | 632 B | 728 B |
-| KV iterate | 560 B | 656 B | 760 B |
-| KV GC churn | 1 248 B | 976 B | 1 056 B |
-| TS append | 528 B | 496 B | 568 B |
-| TS iterate | 568 B | 656 B | 768 B |
+| mount/init | 752 B | 328 B | 368 B |
+| KV set | 736 B | 616 B | 696 B |
+| KV get | 720 B | 640 B | 736 B |
+| KV iterate | 560 B | 664 B | 768 B |
+| KV GC churn | 1 248 B | 984 B | 1 064 B |
+| TS append | 528 B | 504 B | 576 B |
+| TS iterate | 568 B | 664 B | 776 B |
 
-The QEMU firmware is still +216 B ROM over C in the `-z` configuration (the
+The QEMU firmware is still +224 B ROM over C in the `-z` configuration (the
 board acceptance below passes because the board harness has a different
 rodata/code split); RAM and stack are clearly better in both profiles.
 
@@ -126,10 +126,10 @@ on-flash format and behaviour identical.
 
 | configuration | ROM (QEMU, `-z`) | note |
 |---|---:|---|
-| default (256-entry CRC table) | 12 724 B | threshold-50 codegen |
-| default + `--features small-crc` | **11 624 B** | 64-byte CRC table; accepted configuration |
-| + `-InlineThreshold -1` (LLVM `-Oz` default) | 11 640 B | flag-free A/B reference |
-| nightly `build-std` + `small-crc` | board ROM 13 296 B | smallest photographed image (`compare.ps1 -Nightly`) |
+| default (256-entry CRC table) | 12 732 B | threshold-50 codegen |
+| default + `--features small-crc` | **11 632 B** | 64-byte CRC table; accepted configuration |
+| + `-InlineThreshold -1` (LLVM `-Oz` default) | 11 644 B | flag-free A/B reference |
+| nightly `build-std` + `small-crc` | board ROM 13 304 B | smallest photographed image (`compare.ps1 -Nightly`) |
 
 The size build also gets a free CPU win from the codegen flag: on silicon
 `-C llvm-args=-inline-threshold=50` took the `size` profile from TS 531 033 to
@@ -146,15 +146,15 @@ acceptance passes in two configurations (reports:
 
 | metric (on silicon) | C FlashDB | Rust `size` (stable) | Rust nightly | Rust `release` |
 |---|---:|---:|---:|---:|
-| ROM (text+rodata+data) | 13 360 B | **13 332 B** | **13 296 B** | 15 256 B |
+| ROM (text+rodata+data) | 13 360 B | **13 340 B** | **13 304 B** | 15 264 B |
 | static RAM | 1 072 B | **640 B** | **640 B** | **640 B** |
-| stack high-water | 1 240 B | **1 072 B** | **1 072 B** | **1 040 B** |
-| static + stack | 2 312 B | **1 712 B** | **1 712 B** | **1 680 B** |
-| cycles mount | 521 632 | **275 050** | **275 021** | **339 286** |
-| cycles KV | 34 398 930 | **21 910 833** | **21 980 693** | **18 957 732** |
-| cycles TS | 391 359 | **348 295** | **348 888** | **301 637** |
-| cycles rollover | 2 554 342 | **2 092 410** | **2 095 317** | **1 882 504** |
-| cycles total | 38 160 952 | **24 949 003** | **25 022 334** | **21 770 372** |
+| stack high-water | 1 240 B | **1 080 B** | **1 080 B** | **1 048 B** |
+| static + stack | 2 312 B | **1 720 B** | **1 720 B** | **1 688 B** |
+| cycles mount | 521 628 | **275 020** | **274 982** | **339 286** |
+| cycles KV | 34 398 794 | **22 014 556** | **21 780 634** | **18 957 543** |
+| cycles TS | 391 359 | **347 488** | **347 267** | **301 637** |
+| cycles rollover | 2 554 345 | **2 087 865** | **2 086 645** | **1 882 472** |
+| cycles total | 38 160 894 | **25 047 330** | **24 811 950** | **21 770 161** |
 | acceptance verdict | — | **PASS (11/11)** | **PASS (11/11)** | ROM only FAIL |
 
 Reports for all three runs are committed under `docs/acceptance/`
@@ -166,11 +166,11 @@ partition checksums, `rc`) are identical between C and Rust in every
 configuration, and both images leave byte-identical flash partitions.
 
 * **Stable `size` + `small-crc` + `-InlineThreshold 50`** is the recommended
-  configuration: no nightly toolchain needed, all checks pass, ROM −28 B.
+  configuration: no nightly toolchain needed, all checks pass, ROM −20 B.
 * **Nightly `-Z build-std` + `panic=immediate-abort` + ICF** is the smallest
-  image (ROM −64 B) and needs `rustup toolchain install nightly --component rust-src`.
+  image (ROM −56 B) and needs `rustup toolchain install nightly --component rust-src`.
 * **`release` (`-s`)** is the CPU-fastest build (total −43 %) but its ROM is
-  +1 896 B, so it fails only the ROM check.
+  +1 904 B, so it fails only the ROM check.
 
 ### Interpretation
 
@@ -231,10 +231,10 @@ the floor is reproducible rather than assumed):
 | LLVM merge-functions / outliner / MIR flags, thin LTO, CU=16 | 0…+1 800 B |
 | broad `#[inline(always)]` over storage/low leaf helpers | TS −65 k, but **+1 492 B** (rejected; the threshold flag is cheaper) |
 
-The remaining `.text` is still larger than C's (11 116 B vs 9 720 B in the QEMU
+The remaining `.text` is still larger than C's (11 124 B vs 9 720 B in the QEMU
 `-z` build), but the `small-crc` 64-byte table and shorter strings make
-`.rodata` 1 124 B smaller, so the QEMU ROM is only +216 B. On the real board the
-ledger flips: Rust `.text` +1 312 B but `.rodata` −1 284 B → ROM **−64 B**, i.e.
+`.rodata` 1 124 B smaller, so the QEMU ROM is only +224 B. On the real board the
+ledger flips: Rust `.text` +1 284 B but `.rodata` −1 284 B, and C also carries 56 B `.data` → ROM **−56 B**, i.e.
 at parity. Further ROM work means `.text` work; the measured optional levers
 (nightly `optimize_for_size` −80 B, `--lto-O3` −48 B, thin-pointer harness labels
 ~100–150 B) are listed in `OPTIMIZATION.md`.
@@ -273,10 +273,10 @@ reference and on-silicon layers).
 | objective | result |
 |---|---|
 | functional parity (KVDB + TSDB, C-compatible flash format) | **achieved** — byte-identical images both directions, 94 tests green; on silicon C and Rust print identical 21-field `RESULT` output (workload, rollover state and both raw partition image checksums) |
-| performance at least C | **achieved** — flash traffic never higher (KV 2–5x fewer reads); host CPU faster in 11/16 scenarios; **on silicon every phase is faster than C**: `release` total −43.0 %, `size` total −34.6 %, nightly −34.4 % |
-| RAM at least C | **achieved** — QEMU static 624 B vs 1 064 B, stack 1 008 B vs 1 192 B; on silicon static 640 B vs 1 072 B, stack 1 072 B vs 1 240 B, static+stack 1 712 B vs 2 312 B |
-| ROM at least C | **achieved on silicon** — 13 332 B (stable `size`+`small-crc`+`-InlineThreshold 50`) / 13 296 B (nightly) vs C 13 360 B; QEMU harness still +216 B because its rodata split differs |
-| stack at least C | **achieved** — QEMU 1 008 B vs 1 192 B (`-z`); on silicon 1 072 B vs 1 240 B (`size`), 1 040 B (`release`) |
+| performance at least C | **achieved** — flash traffic never higher (KV 2–5x fewer reads); host CPU faster in 11/16 scenarios; **on silicon every phase is faster than C**: `release` total −43.0 %, `size` total −34.4 %, nightly −35.0 % |
+| RAM at least C | **achieved** — QEMU static 624 B vs 1 064 B, stack 1 016 B vs 1 192 B; on silicon static 640 B vs 1 072 B, stack 1 080 B vs 1 240 B, static+stack 1 720 B vs 2 312 B |
+| ROM at least C | **achieved on silicon** — 13 340 B (stable `size`+`small-crc`+`-InlineThreshold 50`) / 13 304 B (nightly) vs C 13 360 B; QEMU harness still +224 B because its rodata split differs |
+| stack at least C | **achieved** — QEMU 1 008 B vs 1 192 B (`-z`); on silicon 1 080 B vs 1 240 B (`size`), 1 048 B (`release`) |
 
 All five acceptance rows are green in the on-silicon verdict (`compare.ps1`,
 11/11 checks). The remaining opportunities are optional margin projects, not

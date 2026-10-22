@@ -10,9 +10,10 @@ The test runs the **real `flashdb` crate** (no host code) on the MCU:
 * TSDB: 200 appends × 16 B payload, full forward iteration over a second
   16 KiB partition; then a rollover phase (1 200 appends past the ring
   capacity + live-window scan + remount + post-recovery append);
-* both databases use the **RAM NOR simulator** in the `.sim_flash` region, so
-  this stage measures real Cortex-M33 CPU behaviour and checks correctness on
-  silicon. A real internal-flash driver is a follow-up step.
+* the acceptance workload uses the **RAM NOR simulator** in the `.sim_flash`
+  region, so this stage measures real Cortex-M33 CPU behaviour and checks
+  correctness on silicon; the separate endurance/long-run images drive the
+  **real STM32U5 internal flash controller** (see below).
 
 Results are written to a RAM buffer (`BOARD_OUT`, `.results` section) instead of
 semihosting, so they can be read back through any debug probe. DWT cycle
@@ -33,23 +34,23 @@ and
 
 | metric on silicon | C FlashDB | Rust `size` (stable) | Rust nightly | verdict |
 |---|---:|---:|---:|---|
-| ROM (text+rodata+data) | 13 360 B | **13 332 B** | **13 296 B** | PASS |
+| ROM (text+rodata+data) | 13 360 B | **13 340 B** | **13 304 B** | PASS |
 | static RAM (data+bss) | 1 072 B | **640 B** | **640 B** | PASS |
-| stack high-water | 1 240 B | **1 072 B** | **1 072 B** | PASS |
-| static + stack RAM | 2 312 B | **1 712 B** | **1 712 B** | PASS |
-| cycles mount | 521 632 | **275 050** | **275 021** | PASS |
-| cycles KV | 34 398 930 | **21 910 833** | **21 980 693** | PASS |
-| cycles TS | 391 359 | **348 295** | **348 888** | PASS |
-| cycles rollover | 2 554 342 | **2 092 410** | **2 095 317** | PASS |
-| cycles total | 38 160 952 | **24 949 003** | **25 022 334** | PASS |
+| stack high-water | 1 240 B | **1 080 B** | **1 080 B** | PASS |
+| static + stack RAM | 2 312 B | **1 720 B** | **1 720 B** | PASS |
+| cycles mount | 521 628 | **275 020** | **274 982** | PASS |
+| cycles KV | 34 398 794 | **22 014 556** | **21 780 634** | PASS |
+| cycles TS | 391 359 | **347 488** | **347 267** | PASS |
+| cycles rollover | 2 554 345 | **2 087 865** | **2 086 645** | PASS |
+| cycles total | 38 160 894 | **25 047 330** | **24 811 950** | PASS |
 | 21 logical `RESULT` fields | — | identical | identical | PASS |
 | both partition image checksums | — | identical | identical | PASS |
 
-Every phase is faster than C (total CPU −34.6 % stable / −34.4 % nightly) while
-the image is smaller (ROM −28 B / −64 B) and static+peak-stack RAM is 26 %
+Every phase is faster than C (total CPU −34.4 % stable / −35.0 % nightly) while
+the image is smaller (ROM −20 B / −56 B) and static+peak-stack RAM is 25.6 %
 lower. The CPU-fastest `release` profile (`-RustProfile release
--RustFeatures small-crc`) is −43.0 % total CPU and 1 040 B stack, but its ROM is
-15 256 B, so it passes every check except ROM.
+-RustFeatures small-crc`) is −43.0 % total CPU and 1 048 B stack, but its ROM is
+15 264 B, so it passes every check except ROM.
 
 Exact acceptance configuration (all defaults of the scripts):
 
@@ -66,9 +67,9 @@ only in ROM/cycles, the C reference prints identical workload/rollover/image
 fields and its own BOARD cycle line):
 
 ```
-RESULT text=12444 rodata=852 data=0 bss=640 sim_flash=32768 stack=1072 stack_init=416 stack_limit=8192 kv_writes=1596 kv_gets=64 kv_iterated=64 kv_checksum=0x4b3486a4 kv_iter_checksum=0x0e250daa ts_appends=200 ts_iterated=200 ts_checksum=0x10d90680 rc=0
+RESULT text=12452 rodata=852 data=0 bss=640 sim_flash=32768 stack=1080 stack_init=424 stack_limit=8192 kv_writes=1596 kv_gets=64 kv_iterated=64 kv_checksum=0x4b3486a4 kv_iter_checksum=0x0e250daa ts_appends=200 ts_iterated=200 ts_checksum=0x10d90680 rc=0
 RESULT ts_roll_appends=1200 ts_roll_erases=9 ts_roll_violations=0 ts_roll_count=392 ts_roll_first_time=2008 ts_roll_last_time=2399 ts_roll_checksum=0xb46ee0c0 ts_roll_remount_count=392 ts_roll_remount_checksum=0xb46ee0c0 ts_roll_continue_ok=1 kv_image_checksum=0x69f5868d ts_image_checksum=0x95091ba6
-BOARD cycles_mount=275021 cycles_kv=21980693 cycles_ts=348888 cycles_roll=2095317 cycles_total=25022334 core_hz=4000000
+BOARD cycles_mount=274982 cycles_kv=21780634 cycles_ts=347267 cycles_roll=2086645 cycles_total=24811950 core_hz=4000000
 ```
 
 ### Board vs. QEMU baseline
@@ -95,11 +96,11 @@ Board, Rust `size` + `small-crc` + threshold 50 (DWT, 4 MHz MSIS reset clock):
 
 | phase | cycles | time @ 4 MHz |
 |---|---:|---:|
-| mount (KVDB + TSDB init) | 275 050 | 68.8 ms |
-| KV workload (set/update/churn/get/iterate) | 21 910 833 | 5.48 s |
-| TS workload (append/iterate) | 348 295 | 87.1 ms |
-| rollover phase (1 200 appends + remount) | 2 092 410 | 523 ms |
-| total | 24 949 003 | 6.24 s |
+| mount (KVDB + TSDB init) | 275 020 | 68.8 ms |
+| KV workload (set/update/churn/get/iterate) | 22 014 556 | 5.50 s |
+| TS workload (append/iterate) | 347 488 | 86.9 ms |
+| rollover phase (1 200 appends + remount) | 2 087 865 | 522 ms |
+| total | 25 047 330 | 6.26 s |
 
 Cycle counts are clock-independent (DWT counts CPU cycles); the board is left on
 its reset clock, so wall-clock time is dominated by the 4 MHz MSIS. Run-to-run
@@ -127,15 +128,15 @@ Measured on 2026-10-23 (STM32U545RE at the 4 MHz MSIS reset clock):
 
 | metric | C FlashDB | Rust `size` stable | Rust nightly | Rust `release` |
 |---|---:|---:|---:|---:|
-| ROM (text+rodata+data) | 13 360 B | **13 332 B (−0.2 %)** | **13 296 B (−0.5 %)** | 15 256 B (+14.2 %) |
+| ROM (text+rodata+data) | 13 360 B | **13 340 B (−0.1 %)** | **13 304 B (−0.4 %)** | 15 264 B (+14.3 %) |
 | static RAM (data+bss) | 1 072 B | **640 B (−40.3 %)** | **640 B (−40.3 %)** | **640 B (−40.3 %)** |
-| stack high-water | 1 240 B | **1 072 B (−13.5 %)** | **1 072 B (−13.5 %)** | **1 040 B (−16.1 %)** |
-| static + stack RAM | 2 312 B | **1 712 B (−26.0 %)** | **1 712 B (−26.0 %)** | **1 680 B (−27.3 %)** |
-| cycles mount | 521 632 | **275 050 (−47.3 %)** | **275 021 (−47.3 %)** | **339 286 (−35.0 %)** |
-| cycles KV | 34 398 930 | **21 910 833 (−36.3 %)** | **21 980 693 (−36.1 %)** | **18 957 732 (−44.9 %)** |
-| cycles TS | 391 359 | **348 295 (−11.0 %)** | **348 888 (−10.9 %)** | **301 637 (−22.9 %)** |
-| cycles rollover | 2 554 342 | **2 092 410 (−18.1 %)** | **2 095 317 (−18.0 %)** | **1 882 504 (−26.3 %)** |
-| cycles total | 38 160 952 | **24 949 003 (−34.6 %)** | **25 022 334 (−34.4 %)** | **21 770 372 (−43.0 %)** |
+| stack high-water | 1 240 B | **1 080 B (−12.9 %)** | **1 080 B (−12.9 %)** | **1 048 B (−15.5 %)** |
+| static + stack RAM | 2 312 B | **1 720 B (−25.6 %)** | **1 720 B (−25.6 %)** | **1 688 B (−27.0 %)** |
+| cycles mount | 521 628 | **275 020 (−47.3 %)** | **274 982 (−47.3 %)** | **339 286 (−35.0 %)** |
+| cycles KV | 34 398 794 | **22 014 556 (−36.0 %)** | **21 780 634 (−36.7 %)** | **18 957 543 (−44.9 %)** |
+| cycles TS | 391 359 | **347 488 (−11.2 %)** | **347 267 (−11.3 %)** | **301 637 (−22.9 %)** |
+| cycles rollover | 2 554 345 | **2 087 865 (−18.3 %)** | **2 086 645 (−18.3 %)** | **1 882 472 (−26.3 %)** |
+| cycles total | 38 160 894 | **25 047 330 (−34.4 %)** | **24 811 950 (−35.0 %)** | **21 770 161 (−43.0 %)** |
 
 Every workload, rollover and image field (21 in total: write/get/iterate counts,
 three workload checksums, the rollover window/erases/recovery fields and both
@@ -144,13 +145,13 @@ configuration.
 
 Verdict:
 
-* **ROM: parity achieved on silicon** — the Rust `.text` is still 1 312 B larger
+* **ROM: parity achieved on silicon** — the Rust `.text` is still 1 284 B larger
   than C's, but the `small-crc` 64-byte table and shorter strings make `.rodata`
-  1 284 B smaller, so the total is −28 B (stable) / −64 B (nightly).
-* **Stack: parity achieved** — 1 072 B vs 1 240 B (the 1 040 B `release` build is
+  1 284 B smaller, so the total is −20 B (stable) / −56 B (nightly).
+* **Stack: parity achieved** — 1 080 B vs 1 240 B (the 1 048 B `release` build is
   even lower).
-* **RAM: clearly ahead** — static RAM −40.3 %, static+stack −26.0 %.
-* **CPU: every phase faster** — total −34.6 % stable / −43.0 % release.
+* **RAM: clearly ahead** — static RAM −40.3 %, static+stack −25.6 %.
+* **CPU: every phase faster** — total −34.4 % stable / −43.0 % release.
 
 ## Rollover and on-flash image identity on silicon
 
@@ -172,7 +173,7 @@ The board workload ends with a rollover phase that is compiled into both images
    equal logical results.
 
 All of this is verified field-for-field against the C reference by
-`compare.ps1`; the rollover phase costs ≈2.1 M cycles (523 ms @ 4 MHz, i.e. 8.4 %
+`compare.ps1`; the rollover phase costs ≈2.1 M cycles (522 ms @ 4 MHz, i.e. 8.3 %
 of the `size`-profile total).
 
 The acceptance check is built into `compare.ps1` (exit status 0 only when all
@@ -185,6 +186,84 @@ harness/firmware/u545re/compare.ps1 -RustProfile size -RustFeatures small-crc
 harness/firmware/u545re/compare.ps1 -Nightly
 # CPU-fastest build (fails only the ROM check)
 harness/firmware/u545re/compare.ps1 -RustProfile release -RustFeatures small-crc
+```
+
+## Real internal-flash endurance and long-run tests (2026-10-23)
+
+Two further board images exercise the **STM32U5 flash controller itself**
+instead of the RAM NOR simulator:
+`harness/firmware/u545re/run_flash_tests.ps1 -Test endurance|longrun` builds,
+flashes and reads them back over SWD.
+
+Driver (`harness/firmware/rust/hwflash.rs`): non-secure FLASH register block
+(`0x4002_2000`, TZEN=0), page erase (8 KiB), 128-bit quad-word programming,
+NSSR error flags checked after every operation. It only touches the scratch
+pages 24..31 of bank 1 (`0x0803_0000..0x0803_FFFF`), far above the firmware
+image, so a test can never erase code.
+
+### Endurance (`-Test endurance`)
+
+Every cycle: program a quad-word (every 16th cycle the full 8 KiB page =
+512 quad-words), read back and compare, erase the page, verify the whole page
+reads `0xFF`. Time-budgeted with DWT; default budget 120 s.
+
+Measured on 2026-10-23 at the 4 MHz MSIS reset clock:
+
+| metric | value |
+|---|---:|
+| P/E cycles (page erase + program) | **10 259** |
+| quad-words programmed | 338 320 (≈2.7 MB) |
+| bytes erased | ≈84 MB (10 259 × 8 KiB) |
+| read-back / erase verification failures | **0** |
+| controller errors (NSSR OPERR/PROGERR/WRPERR/PGAERR/SIZERR/PGSERR/OPTWERR) | **0** |
+| elapsed | 480 223 433 cycles = 120.06 s |
+| per P/E cycle | ≈11.7 ms (including verification) |
+| `FLASH_ACR` / final `NSSR` / `ECCR` | `0x00000000` / `0x00000000` / `0x00000000` |
+| stack high-water | 152 B |
+
+```
+RESULT kind=endurance pe_cycles=10259 programs=338320 elapsed_cycles=480223433 budget_cycles=480000000 checksum=0x7d7afb78 errors=0 verify_ok=1 erased_ok=1 rc=0
+BOARD core_hz=4000000 acr=0x00000000 nssr=0x00000000 nscr=0x40000000 eccr=0x00000000 stack=152 stack_limit=8192 last_nssr=0x00000000
+```
+
+### Long-run (`-Test longrun`)
+
+Runs the real `flashdb` crate on internal flash: KVDB 32 KiB (4 × 8 KiB
+sectors) and TSDB 32 KiB (4 × 8 KiB sectors), `WRITE_GRAN_BITS = 128`.
+Alternating rounds: KV rewrite of 32 keys × 32 B with full read-back compare;
+48 TS appends × 32 B with rollover enabled, then the whole live window is
+verified (contiguous timestamps, exact payloads). Both databases are remounted
+every 4 rounds and at the end, and verified again. 60 s DWT budget.
+
+Measured on 2026-10-23:
+
+| metric | value |
+|---|---:|
+| rounds | 65 |
+| KV sets / TS appends | 2 112 / 3 120 |
+| KV / TS sector erases | 497 / 541 |
+| KV / TS remounts (all verified) | 16 / 16 |
+| TS live window after the run | 192 entries, contiguous, exact payloads |
+| verification failures / controller errors | **0 / 0** |
+| elapsed | 242 358 770 cycles = 60.59 s |
+| stack high-water | 3 440 B |
+
+```
+RESULT kind=longrun rounds=65 kv_sets=2112 ts_appends=3120 ts_time=4120 query_count=192 kv_remounts=16 ts_remounts=16 elapsed_cycles=242358770 budget_cycles=240000000 checksum=0xf0f76d85 errors=0 verify_ok=1 rc=0
+BOARD core_hz=4000000 kv_erases=497 ts_erases=541 stack=3440 stack_limit=8192
+```
+
+Both tests verify deterministically; the DWT time budget makes only the
+cycle/round counts vary slightly between runs. Raw result lines are archived in
+[`docs/acceptance/flash_endurance.txt`](../../../docs/acceptance/flash_endurance.txt)
+and
+[`docs/acceptance/flash_longrun.txt`](../../../docs/acceptance/flash_longrun.txt).
+Re-run:
+
+```powershell
+harness/firmware/u545re/run_flash_tests.ps1 -Test endurance
+harness/firmware/u545re/run_flash_tests.ps1 -Test longrun
+harness/firmware/u545re/run_flash_tests.ps1 -Test endurance -BuildOnly
 ```
 
 ## How to run
@@ -205,6 +284,8 @@ harness/firmware/u545re/compare.ps1                  # both, side by side + verd
 harness/firmware/u545re/run_rust.ps1 -BuildOnly      # build only (no hardware)
 harness/firmware/u545re/run_rust.ps1 -Profile size -Features small-crc
 harness/firmware/u545re/compare.ps1 -Nightly         # smallest layout: nightly -Z build-std
+harness/firmware/u545re/run_flash_tests.ps1 -Test endurance   # real internal-flash endurance
+harness/firmware/u545re/run_flash_tests.ps1 -Test longrun     # real internal-flash DB long-run
 ```
 
 Build/measurement knobs (shared by `run_rust.ps1` and `compare.ps1`):
@@ -236,6 +317,8 @@ scripts/fw_c.sh --board-u545                    # build the C board image (no QE
 
 Both board images use the `board-u545` feature / `-DFDB_BOARD_U545`, flash the
 image, poll the `DONE` flag, read `BOARD_OUT` back over SWD and verify `rc=0`.
+The internal-flash tests use their own `flash-endurance` / `flash-longrun`
+features (`run_flash_tests.ps1`) and write their own `RESULT kind=...` lines.
 Artifacts land in `harness/firmware/build/u545re/` and
 `harness/firmware/build/c_u545/`: ELF, probe log, raw result buffer
 (`board_out.bin`), decoded text (`fw_output.txt`) and, for `compare.ps1`, a
@@ -281,11 +364,19 @@ report (`build/u545re/board_compare*.txt`).
    of materialising the 88-byte `KvEntry`, single-pass `alloc_scan`, GC
    `move_kv` streaming the key hash, cold seal/recovery paths, and a `wg<=8`
    direct-byte `write_status`. Net: `text` −1 056 B / stack −408 B (QEMU
-   phases), board ROM 14 572 → 13 332 B, board stack 1 456 → 1 072 B.
+   phases), board ROM 14 572 → 13 340 B, board stack 1 456 → 1 080 B.
 9. **Board + `stack-phases` diagnostic bug**: the per-phase `st_ts_append`
    diagnostic appended with a timestamp below `last_time()` (the rollover phase
    had already advanced it past 2 399), so a phases-instrumented board image
    failed with `rc=1`. It now uses `last_time()+1`; the QEMU RESULT is unchanged.
+10. **Real internal-flash driver for endurance/long-run tests.** The board
+    workload previously only used the RAM NOR simulator. `hwflash.rs` now drives
+    the STM32U5 flash controller directly (non-secure register block, page erase,
+    128-bit quad-word programming, NSSR error checks) over a reserved scratch
+    region (bank-1 pages 24..31), and the two tests above exercise it on
+    silicon — see the endurance (10 259 P/E cycles, 0 errors) and long-run
+    (2 112 KV sets + 3 120 TS appends over internal flash, 1 038 erases, 0
+    errors) results.
 
 ## Probe/tooling notes
 

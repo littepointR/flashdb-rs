@@ -8,27 +8,27 @@
 
 metric                          C FlashDB           Rust        Rust vs C
 --------------------------    -----------    -----------    -------------
-ROM (text+rodata+data) B            13360          15256     +1896 ( +14.2%)
+ROM (text+rodata+data) B            13360          15264     +1904 ( +14.3%)
 static RAM (data+bss) B              1072            640      -432 ( -40.3%)
-stack high-water B                   1240           1040      -200 ( -16.1%)
-static+stack RAM B                   2312           1680      -632 ( -27.3%)
-cycles mount                       521659         339286   -182373 ( -35.0%)
-cycles KV                        34398898       18957732 -15441166 ( -44.9%)
-cycles TS                          391392         301637    -89755 ( -22.9%)
-cycles rollover                   2554336        1882504   -671832 ( -26.3%)
-cycles total                     38161083       21770372 -16390711 ( -43.0%)
+stack high-water B                   1240           1048      -192 ( -15.5%)
+static+stack RAM B                   2312           1688      -624 ( -27.0%)
+cycles mount                       521628         339286   -182342 ( -35.0%)
+cycles KV                        34398897       18957543 -15441354 ( -44.9%)
+cycles TS                          391399         301637    -89762 ( -22.9%)
+cycles rollover                   2554330        1882472   -671858 ( -26.3%)
+cycles total                     38161033       21770161 -16390872 ( -43.0%)
 
 -- acceptance --
   [PASS] workload results identical to C: 21 fields, checksums included
-  [FAIL] ROM (text+rodata+data) B at least as good as C: 15256 vs 13360
+  [FAIL] ROM (text+rodata+data) B at least as good as C: 15264 vs 13360
   [PASS] static RAM (data+bss) B at least as good as C: 640 vs 1072
-  [PASS] stack high-water B at least as good as C: 1040 vs 1240
-  [PASS] static+stack RAM B at least as good as C: 1680 vs 2312
-  [PASS] cycles mount at least as good as C: 339286 vs 521659
-  [PASS] cycles KV at least as good as C: 18957732 vs 34398898
-  [PASS] cycles TS at least as good as C: 301637 vs 391392
-  [PASS] cycles rollover at least as good as C: 1882504 vs 2554336
-  [PASS] cycles total at least as good as C: 21770372 vs 38161083
+  [PASS] stack high-water B at least as good as C: 1048 vs 1240
+  [PASS] static+stack RAM B at least as good as C: 1688 vs 2312
+  [PASS] cycles mount at least as good as C: 339286 vs 521628
+  [PASS] cycles KV at least as good as C: 18957543 vs 34398897
+  [PASS] cycles TS at least as good as C: 301637 vs 391399
+  [PASS] cycles rollover at least as good as C: 1882472 vs 2554330
+  [PASS] cycles total at least as good as C: 21770161 vs 38161033
   [PASS] both images report the same clock: C=4000000 Rust=4000000
 
 VERDICT: FAIL -- 1 acceptance check(s) not met (see above).

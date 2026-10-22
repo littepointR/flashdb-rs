@@ -24,7 +24,11 @@ RESULT text=11116 rodata=508 data=0 bss=624 sim_flash=32768 stack=1008 \
 
 The same Rust firmware also runs on a **NUCLEO-U545RE-Q** (STM32U545RE,
 Cortex-M33) with probe-rs for on-silicon verification: see
-[`u545re/README.md`](u545re/README.md).
+[`u545re/README.md`](u545re/README.md). Two further board images drive the
+**real STM32U5 internal flash controller** (page erase + 128-bit quad-word
+programming) for an endurance test and a KVDB/TSDB long-run test —
+`harness/firmware/u545re/run_flash_tests.ps1`; they do not use the `.sim_flash`
+RAM simulator.
 
 ---
 
@@ -413,23 +417,23 @@ ROM or MCU RAM.
 
 | metric | C (FlashDB+FAL, `-Os`) | Rust `-s` | Rust `-z` |
 |---|---|---|---|
-| `.text` | 9720 | 12836 | 11116 |
+| `.text` | 9720 | 12844 | 11124 |
 | `.rodata` | 1632 | 508 | 508 |
 | `.data` | 56 | 0 | 0 |
-| **ROM total** (`text+rodata+data`) | **11408** | **13344** | **11624** |
+| **ROM total** (`text+rodata+data`) | **11408** | **13352** | **11632** |
 | `.bss` | 1008 | 624 | 624 |
 | **static RAM** (`data+bss`) | **1064** | **624** | **624** |
-| **stack high-water** | **1192** | **1008** | **1008** |
-| **total RAM** (static+stack) | **2256** | **1632** | **1632** |
-| stack after init (= mount phase) | 696 | 296 | 336 |
+| **stack high-water** | **1192** | **1016** | **1016** |
+| **total RAM** (static+stack) | **2256** | **1640** | **1640** |
+| stack after init (= mount phase) | 696 | 304 | 344 |
 | stack limit | 8192 | 8192 | 8192 |
 | simulated NOR (excluded) | 32768 | 32768 | 32768 |
 | KV checksum / iter checksum | `0x4b3486a4` / `0x0e250daa` | same | same |
 | TS checksum | `0x10d90680` | same | same |
 
-The QEMU `-z` image is still +216 B ROM over C because its `.text` is larger;
+The QEMU `-z` image is still +224 B ROM over C because its `.text` is larger;
 the `.rodata` advantage is smaller than on the board. **On real silicon the
-acceptance passes** (ROM −28 B stable / −64 B nightly) — see
+acceptance passes** (ROM −20 B stable / −56 B nightly) — see
 [`u545re/README.md`](u545re/README.md); the board is the normative footprint
 target because it includes the rollover workload and the board backend.
 
@@ -437,11 +441,11 @@ target because it includes the rollover workload and the board backend.
 
 | metric | Rust `-s` default CRC | Rust `-z` default CRC |
 |---|---|---|
-| `.text` | 12712 | 11256 |
+| `.text` | 12720 | 11264 |
 | `.rodata` | 1468 | 1468 |
-| **ROM total** | **14180** | **12724** |
+| **ROM total** | **14188** | **12732** |
 | `.bss` / static RAM | 624 / 624 | 624 / 624 |
-| stack high-water | 1008 | 1008 |
+| stack high-water | 1016 | 1016 |
 
 `small-crc` saves 836 B (`-s`) / 1100 B (`-z`) of the QEMU image versus the
 default CRC table, at ~2× CRC32 CPU cost; stack/RAM are unchanged and all
@@ -451,16 +455,16 @@ checksums stay identical.
 
 | phase | C | Rust `-s` | Rust `-z` |
 |---|---|---|---|
-| mount/init (`stack_init`) | 752 | 320 | 360 |
-| one KV set | 736 | 608 | 688 |
-| one KV get | 720 | 632 | 728 |
-| full KV iteration | 560 | 656 | 760 |
-| KV GC churn (1500 writes) | 1248 | 976 | 1056 |
-| one TS append | 528 | 496 | 568 |
-| full TS iteration | 568 | 656 | 768 |
-| headline `stack` (non-diagnostic build) | 1192 | 1008 | 1008 |
+| mount/init (`stack_init`) | 752 | 328 | 368 |
+| one KV set | 736 | 616 | 696 |
+| one KV get | 720 | 640 | 736 |
+| full KV iteration | 560 | 664 | 768 |
+| KV GC churn (1500 writes) | 1248 | 984 | 1064 |
+| one TS append | 528 | 504 | 576 |
+| full TS iteration | 568 | 664 | 776 |
+| headline `stack` (non-diagnostic build) | 1192 | 1016 | 1016 |
 
-Diagnostic-build ROM: C 12032, Rust `-s` 15144, Rust `-z` 13044.
+Diagnostic-build ROM: C 12032, Rust `-s` 15152, Rust `-z` 13052.
 Per-phase numbers include each firmware's diagnostic frame (~100–300 B,
 present on both sides); compare deltas, not absolutes. The headline stack
 values come from the non-diagnostic build.
@@ -470,10 +474,10 @@ values come from the non-diagnostic build.
 | bucket | bytes | share |
 |---|---|---|
 | flashdb crate | 7754 | 61.8 % |
-| harness (`fw_rust`) | 4538 | 36.2 % |
+| harness (`fw_rust`) | 4546 | 36.2 % |
 | toolchain mem/aeabi | 138 | 1.1 % |
 | outliner stubs | 108 | 0.9 % |
-| `.text` (size -A) | 12444 | 100 % |
+| `.text` (size -A) | 12452 | 100 % |
 
 Largest symbols: `kv_phase` 764, `kv_mount` 640, `gc_collect_by_free_size` 616,
 TS `mount_into` 548, `move_kv` 436, TS `read_sec_into` 432, `alloc_kv` 416,
@@ -483,11 +487,11 @@ inlined by LTO into the workload wrappers, so treat it as an upper bound.
 ### What is harness-side vs crate-side
 
 * **Static RAM**: Rust wins clearly (624 vs 1064 B QEMU; 640 vs 1072 B board).
-* **Stack**: Rust wins (1008 vs 1192 B QEMU; 1072 vs 1240 B board).
-* **ROM**: board parity achieved; QEMU `-z` is +216 B. The residual is `.text`
+* **Stack**: Rust wins (1016 vs 1192 B QEMU; 1080 vs 1240 B board).
+* **ROM**: board parity achieved; QEMU `-z` is +224 B. The residual is `.text`
   (crate safe code, error plumbing, monomorphisation), which on the board is
   offset by the smaller `.rodata` (64-byte CRC table + shorter labels).
-* **CPU**: the board acceptance is faster than C in every phase (total −34.6 %
+* **CPU**: the board acceptance is faster than C in every phase (total −34.4 %
   stable `size`, −43.0 % `release`). The QEMU cycle proxy
   (`scripts/fw_rust.ps1 -Cycles`, SysTick + `-icount`, 40 instructions/tick,
   deterministic) is available for A/B work without hardware; use ratios, not
