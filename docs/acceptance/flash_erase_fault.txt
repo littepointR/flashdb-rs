@@ -1,0 +1,35 @@
+== building Rust flash-erase-fault firmware (size profile, board-u545) ==
+   rust: ok (size, ICF, inline-threshold=50, features: board-u545+flash-erase-fault) -> D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\fw_rust_u545re_size_flasherasefault.elf
+
+== flashing erase-fault image once and waiting for 20 mid-erase reset rounds ==
+   elf: D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\fw_rust_u545re_size_flasherasefault.elf  timeout: 240 s
+   elf       : D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\fw_rust_u545re_size_flasherasefault.elf
+   BOARD_OUT : 0x20000100 (0x1008 bytes)  _estack: 0x20028000
+
+D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\fw_rust_u545re_size_flasherasefault.elf  :
+section              size        addr
+.text               17292   134217728
+.rodata              2016   134235020
+.data                 104   536870912
+.bss                  128   536871040
+.sim_flash              0   536871168
+.results             4184   536871168
+.ARM.attributes        61           0
+Total               23785
+
+
+-- flashing --
+   flash + verify: ok
+   done after ~18.0s (reset -> DONE)
+
+-- Rust flash-erase-fault firmware output --
+RESULT kind=erase_fault rounds=20 rounds_done=20 boots=21 resets=20 bsy_confirmed=20 kv_erase_resets=10 ts_erase_resets=10 page_erased_after=4 page_partial_after=16 ecc_nmis=121 last_addr=0x0803c000 last_sr=0x00010000 last_loops=512 kv_keys=8 ts_entries=228 ts_first=123 ts_last=350 stack=5568 errors=0 verify_ok=1 rc=0
+-- parsed --
+RESULT fields: kv_erase_resets=10 kv_keys=8 rc=0 ts_entries=228 ts_erase_resets=10 ts_first=123 ts_last=350
+ROM 0 B | static RAM 0 B | stack 5568 B | done 0x454E4F44 (OK)
+result bin: D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\flash-erase-fault\board_out.bin
+
+   rounds=20 boots=21 resets=20 bsy_confirmed=20 (kv_erase=10 ts_erase=10)
+   page_after_reset: erased=4 partial=16 ecc_nmis=121  last_erase: addr=0x0803c000 sr=0x00010000 loops=512
+   kv_keys=8 ts_window=[123..350] (228 entries)
+PASS: 20 mid-erase resets (FLASH_NSSR.BSY==1) injected and recovered on the NUCLEO-U545RE-Q

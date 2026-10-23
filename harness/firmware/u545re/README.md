@@ -190,12 +190,13 @@ harness/firmware/u545re/compare.ps1 -RustProfile release -RustFeatures small-crc
 
 ## Real internal-flash tests (2026-10-23)
 
-Five board images exercise the **STM32U5 flash controller itself** instead of
+Six board images exercise the **STM32U5 flash controller itself** instead of
 the RAM NOR simulator: `run_flash_parity.ps1`, `run_flash_fault.ps1`,
-`run_flash_reboot_soak.ps1` and `run_flash_tests.ps1 -Test endurance|longrun`.
+`run_flash_erase_fault.ps1`, `run_flash_reboot_soak.ps1` and
+`run_flash_tests.ps1 -Test endurance|longrun`.
 They are build-time feature variants of the same firmware (`flash-parity`,
-`flash-fault-write` / `flash-fault-verify`, `flash-reboot-soak`,
-`flash-endurance`, `flash-longrun`).
+`flash-fault-write` / `flash-fault-verify`, `flash-erase-fault`,
+`flash-reboot-soak`, `flash-endurance`, `flash-longrun`).
 
 Driver (`harness/firmware/rust/hwflash.rs`): non-secure FLASH register block
 (`0x4002_2000`, TZEN=0), page erase (8 KiB), 128-bit quad-word programming,
@@ -233,19 +234,52 @@ again, remount clean. The writer leaves a fixed-address SRAM trace
 
 Measured 2026-10-23: **PASS** — 30/30 cycles (seed 99, 1–500 ms delays) and
 20/20 cycles (seed 1234, 20–250 ms) recovered with `rc=0`, with traces showing
-resets inside quad-word **program** windows and between operations. No
-erase-window reset was observed: a debug-probe reset appears to be serviced
-after the flash controller finishes the long erase (documented limitation in
-`docs/TESTING.md`; deterministic mid-erase injection needs an on-chip
-watchdog/RAM-ISR source).
+resets inside quad-word **program** windows and between operations. Because
+initiating a Bank 1 page erase while executing from Bank 1 Flash stalls CPU
+instruction fetch until the erase completes, external debug-probe resets do not
+land inside the erase window; that window is covered deterministically by
+`run_flash_erase_fault.ps1` below.
 
 The test found a real recovery-contract issue: after a reset during a KV record
 write, mount succeeded and the data was usable, but `Kvdb::check()` rejected the
 torn record that recovery had already quarantined. `check()` now skips exactly
 the two states the sector walk skips for torn records (`PRE_WRITE` and recovered
-`ERR_HDR`) and still reports damage to committed records; the new host test
-`crates/flashdb/tests/kv_powercut_check.rs` sweeps every flash op at wg 8 and
-128.
+`ERR_HDR`) and still reports damage to committed records; the host test
+`crates/flashdb/tests/kv_powercut_check.rs` sweeps every flash op across all six
+write granularities (`1, 8, 32, 64, 128, 256`).
+
+### Deterministic mid-erase reset injection (`run_flash_erase_fault.ps1`)
+
+To inject a reset **while the STM32U5 flash controller is actively erasing an
+8 KiB page** (`FLASH_NSSR.BSY == 1`), `RealFlash::arm_erase_reset` diverts the
+target page erase to an SRAM-resident routine (`ram_erase_and_reset` in `.data`,
+`0x2000_xxxx`) with interrupts masked. Executing from SRAM1 avoids Bank 1 AHB
+instruction-fetch stalls, allowing the CPU to start the page erase, poll
+`FLASH_NSSR.BSY == 1` live, spin a swept number of SRAM delay loops (`0..512`)
+inside the active ~1.5 ms erase pulse, record `[abs_addr, nssr_at_reset, loops]`
+into `.results` NOLOAD SRAM, and assert `SCB->AIRCR = SYSRESETREQ` while
+`BSY == 1`.
+
+On the boot following each reset, the firmware installs a RAM vector table
+(`SCB->VTOR`) whose NMI handler clears `FLASH_ECCR.ECCD` double-error NMIs raised
+when scanning partially erased 128-bit quad-words, verifies `BSY == 1` and the
+exact delay loop count at the instant of reset, inspects the interrupted page,
+remounts both `Kvdb` and `Tsdb`, runs `Kvdb::check()`, validates all 8 KV keys
+and the TS live window, writes fresh records, and advances through 20 rounds (10
+KVDB GC erases + 10 TSDB rollover erases).
+
+This test uncovered and fixed a second real hardware bug on 128-bit ECC flash:
+when an aborted GC erase left the sector header intact with
+`sec.dirty == SectorDirtyStatus::Gc`, `Kvdb::mount` resumed `do_gc`, which
+unconditionally called `write_status(..., Gc)` on a granule that was already
+programmed (`NSSR_PROGERR | NSSR_PGSERR = 0x88`). `do_gc` now skips the status
+write when `sec.dirty` is already `Gc`.
+
+Measured 2026-10-23 ([`docs/acceptance/flash_erase_fault.txt`](../../../docs/acceptance/flash_erase_fault.txt)): **PASS**
+
+```
+RESULT kind=erase_fault rounds=20 rounds_done=20 boots=21 resets=20 bsy_confirmed=20 kv_erase_resets=10 ts_erase_resets=10 page_erased_after=4 page_partial_after=16 ecc_nmis=121 last_addr=0x0803c000 last_sr=0x00010000 last_loops=512 kv_keys=8 ts_entries=228 ts_first=123 ts_last=350 stack=5568 errors=0 verify_ok=1 rc=0
+```
 
 ### Reboot soak (`run_flash_reboot_soak.ps1`)
 

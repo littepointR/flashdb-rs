@@ -30,7 +30,8 @@
         feature = "flash-parity",
         feature = "flash-fault-write",
         feature = "flash-fault-verify",
-        feature = "flash-reboot-soak"
+        feature = "flash-reboot-soak",
+        feature = "flash-erase-fault"
     ),
     allow(dead_code)
 )]
@@ -245,14 +246,16 @@ mod board {
 
 #[cfg(feature = "flash-endurance")]
 mod flash_endurance;
+#[cfg(feature = "flash-erase-fault")]
+mod flash_erase_fault;
+#[cfg(feature = "flash-fault-verify")]
+mod flash_fault_verify;
+#[cfg(feature = "flash-fault-write")]
+mod flash_fault_write;
 #[cfg(feature = "flash-longrun")]
 mod flash_longrun;
 #[cfg(feature = "flash-parity")]
 mod flash_parity;
-#[cfg(feature = "flash-fault-write")]
-mod flash_fault_write;
-#[cfg(feature = "flash-fault-verify")]
-mod flash_fault_verify;
 #[cfg(feature = "flash-reboot-soak")]
 mod flash_reboot_soak;
 #[cfg(any(
@@ -261,7 +264,8 @@ mod flash_reboot_soak;
     feature = "flash-parity",
     feature = "flash-fault-write",
     feature = "flash-fault-verify",
-    feature = "flash-reboot-soak"
+    feature = "flash-reboot-soak",
+    feature = "flash-erase-fault"
 ))]
 mod hwflash;
 
@@ -1996,13 +2000,18 @@ pub extern "C" fn main() -> ! {
     {
         flash_reboot_soak::run()
     }
+    #[cfg(feature = "flash-erase-fault")]
+    {
+        flash_erase_fault::run()
+    }
     #[cfg(not(any(
         feature = "flash-endurance",
         feature = "flash-longrun",
         feature = "flash-parity",
         feature = "flash-fault-write",
         feature = "flash-fault-verify",
-        feature = "flash-reboot-soak"
+        feature = "flash-reboot-soak",
+        feature = "flash-erase-fault"
     )))]
     {
         standard_workload()

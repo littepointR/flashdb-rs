@@ -54,6 +54,10 @@ flash-fault-verify = ["board-u545"]
 # Reboot soak: the firmware repeatedly resets itself between write rounds and
 # verifies the persisted database state after each reboot.
 flash-reboot-soak = ["board-u545"]
+# Deterministic mid-erase reset injection: an SRAM routine starts a real page
+# erase, observes NSSR.BSY=1, spins inside the erase window, and resets the MCU
+# before verifying KVDB/TSDB recovery on the next boot.
+flash-erase-fault = ["board-u545"]
 
 [dependencies]
 # Real Rust rewrite under measurement (no_std, no external dependencies).

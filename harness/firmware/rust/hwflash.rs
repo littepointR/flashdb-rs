@@ -247,6 +247,65 @@ pub struct RealFlash {
     /// Off by default (the endurance/long-run/parity images keep the driver
     /// without trace overhead); the power-loss writer image enables it.
     trace: bool,
+    /// When non-zero (`flash-erase-fault` feature), trigger a mid-erase system
+    /// reset from SRAM on the `erase_reset_at`-th page erase of this driver.
+    #[cfg(feature = "flash-erase-fault")]
+    erase_reset_at: u32,
+    #[cfg(feature = "flash-erase-fault")]
+    erase_reset_delay: u32,
+    #[cfg(feature = "flash-erase-fault")]
+    erase_reset_out: *mut u32,
+}
+
+/// SRAM-resident helper that starts a Bank 1 page erase, observes `NSSR.BSY=1`
+/// from SRAM (without fetching instructions from Bank 1 Flash, which would
+/// stall the CPU until the erase completes), spins `delay_loops` iterations
+/// inside the active erase window, records `[abs, sr_at_reset, loops]` into
+/// `out_ptr` in NOLOAD SRAM, and issues `SYSRESETREQ` while `BSY == 1`.
+#[cfg(feature = "flash-erase-fault")]
+#[link_section = ".data"]
+#[inline(never)]
+unsafe fn ram_erase_and_reset(abs: u32, nscr_val: u32, delay_loops: u32, out_ptr: *mut u32) -> ! {
+    core::arch::asm!("cpsid i", options(nomem, nostack, preserves_flags));
+    core::arch::asm!("dsb", options(nomem, nostack, preserves_flags));
+    core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
+
+    let nscr = (REG_BASE + R_NSCR) as *mut u32;
+    let nssr = (REG_BASE + R_NSSR) as *const u32;
+    let aircr = 0xE000_ED0C as *mut u32;
+
+    core::ptr::write_volatile(nscr, nscr_val);
+    core::arch::asm!("dsb", options(nomem, nostack, preserves_flags));
+
+    let mut sr = core::ptr::read_volatile(nssr);
+    let mut wait_bsy = 0u32;
+    while (sr & NSSR_BSY) == 0 && wait_bsy < 1024 {
+        sr = core::ptr::read_volatile(nssr);
+        wait_bsy = wait_bsy.wrapping_add(1);
+    }
+
+    let mut loops = 0u32;
+    while loops < delay_loops {
+        let cur = core::ptr::read_volatile(nssr);
+        if (cur & NSSR_BSY) == 0 {
+            break;
+        }
+        sr = cur;
+        loops = loops.wrapping_add(1);
+    }
+
+    if !out_ptr.is_null() {
+        core::ptr::write_volatile(out_ptr, abs);
+        core::ptr::write_volatile(out_ptr.add(1), sr);
+        core::ptr::write_volatile(out_ptr.add(2), loops);
+    }
+    core::arch::asm!("dsb", options(nomem, nostack, preserves_flags));
+
+    core::ptr::write_volatile(aircr, 0x05FA_0004);
+    core::arch::asm!("dsb", options(nomem, nostack, preserves_flags));
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 impl RealFlash {
@@ -272,9 +331,16 @@ impl RealFlash {
             programs: 0,
             last_status: 0,
             trace: false,
+            #[cfg(feature = "flash-erase-fault")]
+            erase_reset_at: 0,
+            #[cfg(feature = "flash-erase-fault")]
+            erase_reset_delay: 0,
+            #[cfg(feature = "flash-erase-fault")]
+            erase_reset_out: core::ptr::null_mut(),
         };
-        // Clear stale EOP/error flags from a previous run and unlock.
+        // Clear stale EOP/error/ECC flags from a previous run and unlock.
         set_reg(R_NSSR, NSSR_EOP | SR_ERRORS);
+        set_reg(R_ECCR, 0xC000_0000);
         if reg(R_NSCR) & NSCR_LOCK != 0 {
             set_reg(R_NSKEYR, KEY1);
             set_reg(R_NSKEYR, KEY2);
@@ -303,6 +369,18 @@ impl RealFlash {
     /// [`HwTrace`] block (power-loss writer image only; see [`TRACE_ADDR`]).
     pub fn enable_trace(&mut self) {
         self.trace = true;
+    }
+
+    /// Arm a deterministic mid-erase reset on the `nth` page erase (`1`-based)
+    /// performed by this driver instance.  When that erase starts, an
+    /// SRAM-resident routine starts the hardware page erase, waits `delay`
+    /// SRAM poll loops while `NSSR.BSY == 1`, writes `[abs, nssr, loops]` to
+    /// `out_words3` (3 × `u32` in NOLOAD SRAM), and asserts `SYSRESETREQ`.
+    #[cfg(feature = "flash-erase-fault")]
+    pub fn arm_erase_reset(&mut self, nth: u32, delay: u32, out_words3: *mut u32) {
+        self.erase_reset_at = nth;
+        self.erase_reset_delay = delay;
+        self.erase_reset_out = out_words3;
     }
 
     /// Wait until the controller is idle (BUSY and WDW cleared).
@@ -362,8 +440,15 @@ impl RealFlash {
             trace_begin_op(OP_ERASE as u32, abs);
         }
         let page = (abs - FLASH_BASE) / PAGE_SIZE;
+        let nscr_val = (page << NSCR_PNB_SHIFT) | NSCR_PER | NSCR_STRT;
+        #[cfg(feature = "flash-erase-fault")]
+        if self.erase_reset_at != 0 && self.erases.wrapping_add(1) == self.erase_reset_at {
+            unsafe {
+                ram_erase_and_reset(abs, nscr_val, self.erase_reset_delay, self.erase_reset_out);
+            }
+        }
         // Bank 1 (BKER = 0), page number, page erase, start.
-        set_reg(R_NSCR, (page << NSCR_PNB_SHIFT) | NSCR_PER | NSCR_STRT);
+        set_reg(R_NSCR, nscr_val);
         self.wait_idle()?;
         let result = self.finish(OP_ERASE);
         if self.trace {
