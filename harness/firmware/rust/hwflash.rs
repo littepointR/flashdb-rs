@@ -82,6 +82,147 @@ pub const OP_PROGRAM: u8 = 6;
 pub const OP_BOUNDS: u8 = 7;
 pub const OP_VERIFY: u8 = 8;
 
+// ---------------------------------------------------------------------------
+// Cross-image power-loss trace (fault-injection harness)
+//
+// The `flash-fault-write` and `flash-fault-verify` images are separate builds,
+// so their linker-assigned RAM layout (and therefore the address of a static in
+// `.results`) differs between them.  The writer image therefore publishes its
+// "which flash operation was in flight when the external reset hit" post-mortem
+// at a *fixed* address in the unused SRAM1 gap: the static sections end at
+// ~0x2000_9500 (0.6 KiB .data/.bss + 32 KiB `.sim_flash` + 4 KiB `.results`)
+// and the stack starts at `_stack_bottom` = 0x2002_6000 (see board.ld), so
+// 0x2001_0000 is safely between them in every board image.
+// ---------------------------------------------------------------------------
+
+/// Fixed SRAM address of the fault-injection trace block shared by the
+/// `flash-fault-write` and `flash-fault-verify` images.
+pub const TRACE_ADDR: u32 = 0x2001_0000;
+
+/// `HwTrace::op` value while no flash operation is in flight.
+pub const TOP_IDLE: u32 = 0;
+/// `HwTrace::op` value written when a writer image starts its workload (i.e.
+/// the reset hit before the first erase/program).
+pub const TOP_BOOT: u32 = 0x100;
+
+/// Magic/anti-magic pair of a valid trace block.  Two complementary words make
+/// random SRAM contents (or leftovers from an unrelated firmware) extremely
+/// unlikely to be mistaken for a trace.
+pub const TRACE_MAGIC: u32 = 0x4654_5243; // "FTRC"
+
+/// Post-mortem trace of the last flash operation started by a writer image.
+///
+/// Written with volatile stores by [`RealFlash`] when tracing is enabled, so it
+/// survives a warm reset (SRAM is not cleared by a Cortex-M system reset) and
+/// the verifier image can report which window the reset landed in.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HwTrace {
+    /// [`TRACE_MAGIC`] when the block is valid.
+    pub magic: u32,
+    /// `!magic` (second validity word).
+    pub magic_inv: u32,
+    /// Number of operations started since the writer image booted.
+    pub seq: u32,
+    /// Operation in flight: [`TOP_IDLE`], [`TOP_BOOT`], [`OP_ERASE`] or
+    /// [`OP_PROGRAM`].
+    pub op: u32,
+    /// Absolute flash address of the operation in flight.
+    pub addr: u32,
+    /// Completed page erases since the writer booted.
+    pub erases: u32,
+    /// Completed quad-word programs since the writer booted.
+    pub programs: u32,
+    /// Writer failure code (`0` = none); set by the writer image's error path.
+    pub error: u32,
+}
+
+const T_MAGIC: u32 = 0;
+const T_MAGIC_INV: u32 = 1;
+const T_SEQ: u32 = 2;
+const T_OP: u32 = 3;
+const T_ADDR: u32 = 4;
+const T_ERASES: u32 = 5;
+const T_PROGRAMS: u32 = 6;
+const T_ERROR: u32 = 7;
+
+#[inline(always)]
+fn trace_read(field: u32) -> u32 {
+    unsafe { core::ptr::read_volatile((TRACE_ADDR + field * 4) as *const u32) }
+}
+
+#[inline(always)]
+fn trace_write(field: u32, value: u32) {
+    unsafe { core::ptr::write_volatile((TRACE_ADDR + field * 4) as *mut u32, value) }
+}
+
+/// Whether the trace block holds a complete trace from a previous writer run.
+pub fn trace_valid() -> bool {
+    trace_read(T_MAGIC) == TRACE_MAGIC && trace_read(T_MAGIC_INV) == !TRACE_MAGIC
+}
+
+/// Start a fresh trace block for a new writer run (invalidates first, so a
+/// reset in the middle of the initialization leaves an invalid trace).
+pub fn trace_init() {
+    trace_write(T_MAGIC, 0);
+    trace_write(T_MAGIC_INV, 0);
+    trace_write(T_SEQ, 0);
+    trace_write(T_OP, TOP_BOOT);
+    trace_write(T_ADDR, 0);
+    trace_write(T_ERASES, 0);
+    trace_write(T_PROGRAMS, 0);
+    trace_write(T_ERROR, 0);
+    trace_write(T_MAGIC_INV, !TRACE_MAGIC);
+    trace_write(T_MAGIC, TRACE_MAGIC);
+}
+
+/// Invalidate the trace block (called by the verifier image once it has copied
+/// the trace, so the next writer download starts from the fresh-run path).
+pub fn trace_clear() {
+    trace_write(T_MAGIC, 0);
+    trace_write(T_MAGIC_INV, 0);
+}
+
+/// Record the start of one flash operation (before the controller is touched).
+pub fn trace_begin_op(op: u32, abs: u32) {
+    let seq = trace_read(T_SEQ).wrapping_add(1);
+    trace_write(T_OP, op);
+    trace_write(T_ADDR, abs);
+    trace_write(T_SEQ, seq);
+}
+
+/// Record the successful completion of the operation last passed to
+/// [`trace_begin_op`] (`op` selects the counter to bump).
+pub fn trace_end_op(op: u32) {
+    trace_write(T_OP, TOP_IDLE);
+    let field = if op == OP_ERASE as u32 {
+        T_ERASES
+    } else {
+        T_PROGRAMS
+    };
+    trace_write(field, trace_read(field).wrapping_add(1));
+}
+
+/// Record a driver/controller error in the trace (`op` and raw status are
+/// packed so the verifier can print them).
+pub fn trace_note_error(op: u32, status: u32) {
+    trace_write(T_ERROR, (op << 16) | (status & 0xFFFF));
+}
+
+/// Copy the trace block out (fields are read with volatile loads).
+pub fn trace_snapshot() -> HwTrace {
+    HwTrace {
+        magic: trace_read(T_MAGIC),
+        magic_inv: trace_read(T_MAGIC_INV),
+        seq: trace_read(T_SEQ),
+        op: trace_read(T_OP),
+        addr: trace_read(T_ADDR),
+        erases: trace_read(T_ERASES),
+        programs: trace_read(T_PROGRAMS),
+        error: trace_read(T_ERROR),
+    }
+}
+
 #[inline(always)]
 fn reg(off: u32) -> u32 {
     unsafe { core::ptr::read_volatile((REG_BASE + off) as *const u32) }
@@ -102,6 +243,10 @@ pub struct RealFlash {
     pub programs: u32,
     /// Last raw NSSR value (for failure reporting).
     pub last_status: u32,
+    /// Publish every erase/program to the fixed-address [`HwTrace`] block.
+    /// Off by default (the endurance/long-run/parity images keep the driver
+    /// without trace overhead); the power-loss writer image enables it.
+    trace: bool,
 }
 
 impl RealFlash {
@@ -126,6 +271,7 @@ impl RealFlash {
             erases: 0,
             programs: 0,
             last_status: 0,
+            trace: false,
         };
         // Clear stale EOP/error flags from a previous run and unlock.
         set_reg(R_NSSR, NSSR_EOP | SR_ERRORS);
@@ -151,6 +297,12 @@ impl RealFlash {
     #[inline]
     pub fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Enable publishing of every erase/program to the fixed-address
+    /// [`HwTrace`] block (power-loss writer image only; see [`TRACE_ADDR`]).
+    pub fn enable_trace(&mut self) {
+        self.trace = true;
     }
 
     /// Wait until the controller is idle (BUSY and WDW cleared).
@@ -206,11 +358,21 @@ impl RealFlash {
         }
         self.wait_idle()?;
         set_reg(R_NSSR, NSSR_EOP | SR_ERRORS);
+        if self.trace {
+            trace_begin_op(OP_ERASE as u32, abs);
+        }
         let page = (abs - FLASH_BASE) / PAGE_SIZE;
         // Bank 1 (BKER = 0), page number, page erase, start.
         set_reg(R_NSCR, (page << NSCR_PNB_SHIFT) | NSCR_PER | NSCR_STRT);
         self.wait_idle()?;
-        self.finish(OP_ERASE)?;
+        let result = self.finish(OP_ERASE);
+        if self.trace {
+            match result {
+                Ok(()) => trace_end_op(OP_ERASE as u32),
+                Err(e) => trace_note_error(e.op as u32, e.status),
+            }
+        }
+        result?;
         self.erases += 1;
         Ok(())
     }
@@ -226,6 +388,9 @@ impl RealFlash {
         self.wait_idle()?;
         set_reg(R_NSSR, NSSR_EOP | SR_ERRORS);
         set_reg(R_NSCR, NSCR_PG);
+        if self.trace {
+            trace_begin_op(OP_PROGRAM as u32, abs);
+        }
         // With PG set, four 32-bit writes to the flash address program the
         // quad-word (same sequence as STM32Cube HAL_FLASH_Program_QuadWord).
         for i in 0..4u32 {
@@ -241,7 +406,14 @@ impl RealFlash {
         }
         self.wait_idle()?;
         set_reg(R_NSCR, reg(R_NSCR) & !NSCR_PG);
-        self.finish(OP_PROGRAM)?;
+        let result = self.finish(OP_PROGRAM);
+        if self.trace {
+            match result {
+                Ok(()) => trace_end_op(OP_PROGRAM as u32),
+                Err(e) => trace_note_error(e.op as u32, e.status),
+            }
+        }
+        result?;
         self.programs += 1;
         Ok(())
     }

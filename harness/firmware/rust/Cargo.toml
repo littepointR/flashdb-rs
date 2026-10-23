@@ -42,6 +42,18 @@ flash-endurance = ["board-u545"]
 # On-silicon long-run test: real KVDB + TSDB on internal flash for ~60 s of
 # operation, with per-round verification and remounts (see flash_longrun.rs).
 flash-longrun = ["board-u545"]
+# On-silicon real-flash C/Rust image parity: the crate writes the deterministic
+# parity image on internal flash; the host compares it with the host model.
+flash-parity = ["board-u545"]
+# Real-flash power-loss injection: writer image stopped by an external reset
+# while it is programming/erasing (no result is printed; the host resets it).
+flash-fault-write = ["board-u545"]
+# Verification image run after interrupted writes: mount/recover, verify the
+# database and print the recovery result.
+flash-fault-verify = ["board-u545"]
+# Reboot soak: the firmware repeatedly resets itself between write rounds and
+# verifies the persisted database state after each reboot.
+flash-reboot-soak = ["board-u545"]
 
 [dependencies]
 # Real Rust rewrite under measurement (no_std, no external dependencies).

@@ -33,7 +33,7 @@ param(
     [switch]$BuildOnly,
     [switch]$NoBuild,
     [string]$Chip = 'STM32U545RE',
-    [int]$TimeoutSec = 300,
+    [int]$TimeoutSec = 400,
     [string]$OutDir = ''
 )
 

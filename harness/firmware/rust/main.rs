@@ -24,7 +24,14 @@
 // The internal-flash test builds replace the standard measurement workload at
 // compile time, so the workload constants/helpers are intentionally unused there.
 #![cfg_attr(
-    any(feature = "flash-endurance", feature = "flash-longrun"),
+    any(
+        feature = "flash-endurance",
+        feature = "flash-longrun",
+        feature = "flash-parity",
+        feature = "flash-fault-write",
+        feature = "flash-fault-verify",
+        feature = "flash-reboot-soak"
+    ),
     allow(dead_code)
 )]
 
@@ -240,7 +247,22 @@ mod board {
 mod flash_endurance;
 #[cfg(feature = "flash-longrun")]
 mod flash_longrun;
-#[cfg(any(feature = "flash-endurance", feature = "flash-longrun"))]
+#[cfg(feature = "flash-parity")]
+mod flash_parity;
+#[cfg(feature = "flash-fault-write")]
+mod flash_fault_write;
+#[cfg(feature = "flash-fault-verify")]
+mod flash_fault_verify;
+#[cfg(feature = "flash-reboot-soak")]
+mod flash_reboot_soak;
+#[cfg(any(
+    feature = "flash-endurance",
+    feature = "flash-longrun",
+    feature = "flash-parity",
+    feature = "flash-fault-write",
+    feature = "flash-fault-verify",
+    feature = "flash-reboot-soak"
+))]
 mod hwflash;
 
 #[cfg(all(feature = "flash-endurance", feature = "flash-longrun"))]
@@ -1958,7 +1980,30 @@ pub extern "C" fn main() -> ! {
     {
         flash_longrun::run()
     }
-    #[cfg(not(any(feature = "flash-endurance", feature = "flash-longrun")))]
+    #[cfg(feature = "flash-parity")]
+    {
+        flash_parity::run()
+    }
+    #[cfg(feature = "flash-fault-write")]
+    {
+        flash_fault_write::run()
+    }
+    #[cfg(feature = "flash-fault-verify")]
+    {
+        flash_fault_verify::run()
+    }
+    #[cfg(feature = "flash-reboot-soak")]
+    {
+        flash_reboot_soak::run()
+    }
+    #[cfg(not(any(
+        feature = "flash-endurance",
+        feature = "flash-longrun",
+        feature = "flash-parity",
+        feature = "flash-fault-write",
+        feature = "flash-fault-verify",
+        feature = "flash-reboot-soak"
+    )))]
     {
         standard_workload()
     }
