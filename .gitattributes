@@ -1,0 +1,5 @@
+# Bash tooling is executed under WSL/Linux, where CRLF shebangs and line
+# continuations break (the differential/benchmark scripts are run this way).
+*.sh text eol=lf
+# PowerShell tooling is Windows-only; check it out with native CRLF.
+*.ps1 text eol=crlf
