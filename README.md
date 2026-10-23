@@ -1,5 +1,7 @@
 # FlashDB-rs
 
+English | [简体中文](README_zh.md)
+
 A from-scratch **Rust rewrite of [FlashDB](https://github.com/armink/FlashDB)** —
 the ultra-lightweight embedded key-value and time-series database for raw flash.
 
@@ -56,16 +58,24 @@ internals are Rust-native:
 
 * **No global state.** A database owns its flash through generics
   (`Kvdb<F>` / `Tsdb<F, T>`), instead of a FAL registry and a global lock.
-  Implement the `Flash` trait for a partition view and pass it in.
+  Implement the `Flash` trait for a partition view (or wrap a shared flash with
+  the built-in `Partition<F>` sub-range adapter) and pass it in.
 * **No heap.** `#![no_std]`, all buffers are stack or
   caller-provided. The crate is `#![deny(unsafe_code)]` with two audited placement-initializer
   functions (`Kvdb::mount_into`, `Tsdb::mount_into`) so that a database stored
   in a `static` (the normal MCU pattern) needs no stack copy.
 * **Typed errors.** `Error<E>` carries the flash driver's own error and says
   which operation failed; no `FDB_ASSERT` busy-loop, no error codes lost.
+  `Config::not_formattable(true)` returns `Error::NotFormatted` instead of
+  auto-formatting blank or corrupted partitions.
 * **Iterators instead of callbacks.** KV and TS iteration are real
   `Iterator`s; TS supports forward, reverse and by-time modes. Values are read
-  on demand, so iteration does not copy payloads you do not need.
+  on demand (including windowed `read_value_at` / `read_blob_at` that still
+  verify the full-record CRC32), so iteration does not copy payloads you do not
+  need.
+* **Schema-versioned defaults.** `Kvdb::auto_update(version, defaults)` matches
+  C `FDB_KV_AUTO_UPDATE` (`__ver_num__`) for zero-copy firmware default
+  migrations.
 * **Compile-time configuration.** Write granularity is a constant of the flash
   driver (`WRITE_GRAN_BITS`); layout tables, status encodings and buffer sizes
   specialise per concrete flash type with zero runtime cost. Timestamp width is
