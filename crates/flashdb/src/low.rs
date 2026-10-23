@@ -339,7 +339,11 @@ pub(crate) fn decode_status(wg_bits: u32, status_num: usize, table: &[u8]) -> us
         while c > 0 {
             let index = c - 1;
             let off = index * chunk;
-            if table[off..off + chunk].iter().all(|b| *b == 0) {
+            // FlashDB-C `_fdb_get_status()` tests only the first byte of the
+            // write-granule chunk. The rest of the chunk stays erased, because
+            // `_fdb_set_status()` clears one byte and `_fdb_write_status()`
+            // programmes the whole granule (00 FF .. FF).
+            if table[off] == 0 {
                 return c;
             }
             c -= 1;
@@ -367,8 +371,13 @@ pub(crate) fn encode_status<'a>(
         (bit_index / 8, &scratch[..1])
     } else {
         let chunk = (wg_bits / 8) as usize;
-        for b in scratch[..chunk].iter_mut() {
-            *b = 0;
+        // Match FlashDB-C byte for byte for write granularities > 8 bits:
+        // `_fdb_set_status()` clears only the first byte of the granule and
+        // leaves the remaining bytes erased (0xFF); `_fdb_write_status()`
+        // programmes the full `FDB_WRITE_GRAN / 8`-byte granule.
+        scratch[0] = 0;
+        for b in scratch[1..chunk].iter_mut() {
+            *b = 0xFF;
         }
         ((status - 1) * chunk, &scratch[..chunk])
     }

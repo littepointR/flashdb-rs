@@ -2056,6 +2056,11 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     }
 
     /// Verify the CRC32 of every committed record.
+    ///
+    /// Torn, uncommitted records left behind by a power cut are not corruption:
+    /// mount recovery already ignores those holes (they never reached the
+    /// committed `Write` state), so `check` skips them the same way and only
+    /// reports a damaged *committed* record (bad CRC/value) as an error.
     pub fn check(&mut self) -> Result<(), F::Error> {
         let sec_size = self.storage.sec_size();
         let lay = self.lay();
@@ -2077,6 +2082,23 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
                         // The record area ends at the first fully erased header.
                         if hdr.erased {
                             break;
+                        }
+                        // A torn header is the leftover of a write that
+                        // never committed: FlashDB programs the PRE_WRITE
+                        // status before the header body, so such a hole has
+                        // status PRE_WRITE (recovery may have already
+                        // quarantined it as ERR_HDR) and an incomplete body.
+                        // The sector walk (`read_sector_info_into`) skips
+                        // exactly these two states, so `check` does too. Any
+                        // other non-erased invalid header is real damage to a
+                        // committed record and is reported.
+                        if matches!(hdr.status, KvStatus::PreWrite | KvStatus::ErrHdr) {
+                            let next = self.advance_kv(sec.addr + sec_size, &hdr)?;
+                            if next == FAILED_ADDR {
+                                break;
+                            }
+                            kv_addr = next;
+                            continue;
                         }
                         return Err(Error::ReadCorrupted);
                     }
