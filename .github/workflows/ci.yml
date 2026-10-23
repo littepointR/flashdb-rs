@@ -1,0 +1,94 @@
+name: CI
+
+# Host test suite, documentation build and the QEMU firmware comparison.
+# Everything here runs on a standard GitHub-hosted Ubuntu runner; the
+# on-silicon acceptance/endurance jobs live in hardware.yml (manual, self-hosted).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: Host tests, rustfmt and rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Workspace tests (release)
+        run: cargo test --workspace --release
+
+      - name: flashdb tests with std feature
+        run: cargo test -p flashdb --release --features std
+
+      - name: Documentation (warnings are errors)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+  firmware-qemu:
+    name: Firmware comparison on QEMU (Cortex-M3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (thumbv7m target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            harness/firmware/rust -> target
+
+      - name: Install QEMU and the ARM GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm gcc-arm-none-eabi python3
+
+      - name: Fetch the FlashDB C reference
+        run: bash scripts/fetch_reference.sh
+
+      - name: Build and run the C reference firmware (QEMU)
+        run: bash scripts/fw_c.sh
+
+      - name: Build and run the Rust firmware (QEMU)
+        run: bash scripts/fw_rust.sh
+
+      - name: Upload firmware logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-qemu-logs
+          path: |
+            harness/firmware/build/c/
+            harness/firmware/build/rust/
+          if-no-files-found: warn

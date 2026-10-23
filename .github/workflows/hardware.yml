@@ -1,0 +1,65 @@
+name: Hardware (NUCLEO-U545RE-Q)
+
+# Manual-only on-silicon validation. The runner requirement is a self-hosted
+# Windows machine with the labels `self-hosted`, `windows`, `stm32u5` and:
+#
+#   * a NUCLEO-U545RE-Q (STM32U545RE, Cortex-M33) attached through its
+#     on-board ST-LINK/V3, usable by probe-rs (`probe-rs list` must show it),
+#   * probe-rs on PATH (e.g. `cargo install probe-rs-tools --locked`),
+#   * the ARM GNU toolchain (`arm-none-eabi-gcc`/`arm-none-eabi-size`),
+#   * stable rustup with the `thumbv7m-none-eabi` target, plus a nightly
+#     toolchain with `rust-src` for `compare.ps1 -Nightly` (-Z build-std),
+#   * the FlashDB C reference fetched once (`bash scripts/fetch_reference.sh`
+#     from Git Bash, or clone it into reference/FlashDB).
+#
+# The board is flashed by the scripts themselves; nothing is shared between
+# runs, but `concurrency` still serialises them in case several runs are queued.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: hardware-u545re
+  cancel-in-progress: false
+
+jobs:
+  board:
+    name: Board acceptance, endurance and long-run
+    runs-on: [self-hosted, windows, stm32u5]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain sanity
+        run: |
+          rustc --version
+          cargo --version
+          probe-rs --version
+          arm-none-eabi-gcc --version | Select-Object -First 1
+
+      - name: C vs Rust acceptance (compare.ps1 -Nightly)
+        run: pwsh -NoProfile -File harness/firmware/u545re/compare.ps1 -Nightly
+
+      - name: Internal-flash endurance (real erase/program cycles)
+        if: always()
+        run: pwsh -NoProfile -File harness/firmware/u545re/run_flash_tests.ps1 -Test endurance
+
+      - name: Internal-flash long-run (KVDB + TSDB on internal flash)
+        if: always()
+        run: pwsh -NoProfile -File harness/firmware/u545re/run_flash_tests.ps1 -Test longrun
+
+      - name: Upload board reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: u545re-board-reports
+          path: |
+            harness/firmware/build/u545re/*.txt
+            harness/firmware/build/u545re/**/*.txt
+            harness/firmware/build/u545re/**/*.log
+            harness/firmware/build/c_u545/**/*.txt
+          if-no-files-found: warn
