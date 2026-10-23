@@ -112,24 +112,29 @@ Verified on silicon: the firmware completes with `rc=0`, both `RESULT` lines are
 byte-identical over repeated runs, and all workload checksums
 (`kv_checksum`, `kv_iter_checksum`, `ts_checksum`) match the QEMU Cortex-M3
 baseline exactly. The C reference has the same board backend, so the comparison
-is like-for-like on identical silicon, and **the acceptance now passes in both
-the stable and the nightly `size` build**: ROM 13 340 B / 13 304 B vs C 13 360 B,
+is like-for-like on identical silicon, and **the acceptance passes in both the
+stable and the nightly `size` build**: ROM **13 228 B / 13 204 B** vs C 13 360 B,
 stack 1 080 B vs 1 240 B, static RAM 640 B vs 1 072 B, and every workload phase
-is faster than C (total CPU −34.4 %; the CPU-fast `release` profile is −43.0 %
-but larger ROM). The board run also covers **TSDB rollover** (1 200 appends past
-capacity, live-window/remount/NOR-safety checks) and proves the C and Rust
-images leave **byte-identical flash partitions**. Flashing uses **probe-rs**,
-which programs the STM32U5 independently of the probe's own flash loader; the
-earlier OpenOCD/pyOCD probe hang does not apply to that path, and no ST-LINK
-firmware update was needed.
+is faster than C (total CPU −35.2 % stable / −35.5 % nightly; the CPU-fast
+`release` profile is −44.2 % but larger ROM). The board run also covers **TSDB
+rollover** (1 200 appends past capacity, live-window/remount/NOR-safety checks)
+and proves the C and Rust images leave **byte-identical flash partitions**.
+Flashing uses **probe-rs**, which programs the STM32U5 independently of the
+probe's own flash loader; the earlier OpenOCD/pyOCD probe hang does not apply to
+that path, and no ST-LINK firmware update was needed.
 
-Real internal flash is exercised too: `run_flash_tests.ps1 -Test endurance` ran
-**10 259 page erase/program cycles** on one STM32U5 page with per-cycle read-back
-and full-page erased verification (338 320 quad-words ≈ 2.7 MB programmed, 0
-errors), and `-Test longrun` ran the real KVDB+TSDB on internal flash for 60 s
-(65 rounds, 2 112 KV sets, 3 120 TS appends, 1 038 sector erases, 16+16 verified
-remounts, 0 errors). Full tables, reproduction commands and the exact
-acceptance configuration:
+Real internal flash (bank-1 scratch pages only) is exercised by five dedicated
+images: a deterministic KV+TS image written with `WRITE_GRAN=128` is
+**byte-identical to the host model** on silicon; an external-reset
+**power-loss** injector recovers **50/50** interrupted cycles; a **20-boot/19-reset
+soak** verifies persistence and remounting; 240 s of page erase/program
+**endurance** reaches **22 493 P/E cycles** on all 8 scratch pages (740 967
+quad-words, 22 509 erases, 0 errors); and a 60 s **KVDB+TSDB long-run** does
+72 rounds with 1 405 sector erases and 18+18 verified remounts (0 errors).
+The power-loss test found and fixed a `Kvdb::check()` false positive on torn
+`PRE_WRITE` headers; the host C-compat matrix also found and fixed a
+`WRITE_GRAN>8` status-granule mismatch (~110 B ROM side benefit). Full tables,
+reproduction commands and the exact acceptance configuration:
 [`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md); test
 inventory and coverage: [`docs/TESTING.md`](docs/TESTING.md).
 
@@ -176,6 +181,11 @@ On real hardware (`NUCLEO-U545RE-Q`, see
 ```sh
 harness/firmware/u545re/run_rust.sh       # POSIX: build + flash + run (probe-rs/pyOCD/OpenOCD)
 harness/firmware/u545re/run_rust.ps1      # Windows/PowerShell: build + flash + run (probe-rs)
+harness/firmware/u545re/run_flash_parity.ps1       # real internal flash: C-model image parity
+harness/firmware/u545re/run_flash_fault.ps1        # real internal flash: power-loss injection
+harness/firmware/u545re/run_flash_reboot_soak.ps1  # real internal flash: 20-boot soak
+harness/firmware/u545re/run_flash_tests.ps1 -Test endurance   # real internal flash: 240 s P/E
+harness/firmware/u545re/run_flash_tests.ps1 -Test longrun     # real internal flash: 60 s DB soak
 ```
 
 The benchmarks use a RAM-backed NOR simulator with exact NOR semantics
@@ -190,7 +200,7 @@ simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS
 
 | metric (Cortex-M3 QEMU, same workload) | C FlashDB | Rust |
 |---|---:|---:|
-| ROM (`-Os` vs `-z` + `small-crc` + `-InlineThreshold 50`) | 11 408 B | 11 632 B (+2.0 %); on silicon **13 340 B vs C 13 360 B (parity)** |
+| ROM (`-Os` vs `-z` + `small-crc` + `-InlineThreshold 50`) | 11 408 B | 11 632 B (+2.0 %); on silicon **13 228 B (stable) / 13 204 B (nightly) vs C 13 360 B (parity)** |
 | static RAM | 1 064 B | **624 B** |
 | stack high-water | 1 192 B | **1 008 B** |
 | static + stack RAM | 2 256 B | **1 632 B** |
@@ -198,12 +208,19 @@ simulator; full tables and methodology in [`docs/BENCHMARKS.md`](docs/BENCHMARKS
 | TS flash reads / writes / erases | identical to C in every scenario | identical |
 
 All scenarios produce identical logical checksums, and Rust-written and
-C-written flash images are byte-identical for `WRITE_GRAN` 1 and 8. On the real
+C-written flash images are byte-identical for `WRITE_GRAN` 1, 8, 32, 64 and 128
+(all six granularities are checked; wg 256 is a documented C-side XFAIL because
+the C reference tool is nondeterministic there). On the real
 board the C-vs-Rust acceptance passes every check (ROM, static RAM, stack,
 static+stack, all five cycle phases, 21 logical fields, both raw image
 checksums); the QEMU harness image is still +224 B ROM because of its different
-rodata/code split, while the board image is −56 B. The optimisation record and
-the remaining optional levers are in `docs/OPTIMIZATION.md`.
+rodata/code split, while the board image is −132/−156 B. The optimisation record
+and the remaining optional levers are in `docs/OPTIMIZATION.md`.
+
+CI (`.github/workflows/ci.yml`) runs formatting, the full host suite (default and
+`--features std`), rustdoc with `-D warnings` and the QEMU firmware build on
+every push/PR; `.github/workflows/hardware.yml` is a manual self-hosted-runner
+workflow for the NUCLEO-U545RE-Q real-hardware suite.
 
 Two build options matter for the size/CPU trade-off:
 `--features small-crc` (64-byte CRC table instead of 1 KiB, −960 B rodata, ~2x

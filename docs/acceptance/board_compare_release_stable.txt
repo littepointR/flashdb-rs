@@ -2,33 +2,33 @@
 ===============================================================
  C FlashDB vs Rust flashdb -- NUCLEO-U545RE-Q (STM32U545RE)
 ===============================================================
- C image    : harness\firmware\build\c_u545\fw_c_u545.elf
- Rust image : harness\firmware\build\u545re\fw_rust_u545re_smallcrc.elf (release + small-crc, inline-threshold=50)
+ C image    : D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\c_u545\fw_c_u545.elf
+ Rust image : D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\fw_rust_u545re_smallcrc.elf (release + small-crc, inline-threshold=50)
  logical    : prints sent to the same NOR simulator, same workload
 
 metric                          C FlashDB           Rust        Rust vs C
 --------------------------    -----------    -----------    -------------
-ROM (text+rodata+data) B            13360          15264     +1904 ( +14.3%)
+ROM (text+rodata+data) B            13360          15128     +1768 ( +13.2%)
 static RAM (data+bss) B              1072            640      -432 ( -40.3%)
 stack high-water B                   1240           1048      -192 ( -15.5%)
 static+stack RAM B                   2312           1688      -624 ( -27.0%)
-cycles mount                       521628         339286   -182342 ( -35.0%)
-cycles KV                        34398897       18957543 -15441354 ( -44.9%)
-cycles TS                          391399         301637    -89762 ( -22.9%)
-cycles rollover                   2554330        1882472   -671858 ( -26.3%)
-cycles total                     38161033       21770161 -16390872 ( -43.0%)
+cycles mount                       521658         338808   -182850 ( -35.1%)
+cycles KV                        34398886       18529245 -15869641 ( -46.1%)
+cycles TS                          391359         291349   -100010 ( -25.6%)
+cycles rollover                   2554335        1828442   -725893 ( -28.4%)
+cycles total                     38161026       21277175 -16883851 ( -44.2%)
 
 -- acceptance --
   [PASS] workload results identical to C: 21 fields, checksums included
-  [FAIL] ROM (text+rodata+data) B at least as good as C: 15264 vs 13360
+  [FAIL] ROM (text+rodata+data) B at least as good as C: 15128 vs 13360
   [PASS] static RAM (data+bss) B at least as good as C: 640 vs 1072
   [PASS] stack high-water B at least as good as C: 1048 vs 1240
   [PASS] static+stack RAM B at least as good as C: 1688 vs 2312
-  [PASS] cycles mount at least as good as C: 339286 vs 521628
-  [PASS] cycles KV at least as good as C: 18957543 vs 34398897
-  [PASS] cycles TS at least as good as C: 301637 vs 391399
-  [PASS] cycles rollover at least as good as C: 1882472 vs 2554330
-  [PASS] cycles total at least as good as C: 21770161 vs 38161033
+  [PASS] cycles mount at least as good as C: 338808 vs 521658
+  [PASS] cycles KV at least as good as C: 18529245 vs 34398886
+  [PASS] cycles TS at least as good as C: 291349 vs 391359
+  [PASS] cycles rollover at least as good as C: 1828442 vs 2554335
+  [PASS] cycles total at least as good as C: 21277175 vs 38161026
   [PASS] both images report the same clock: C=4000000 Rust=4000000
 
 VERDICT: FAIL -- 1 acceptance check(s) not met (see above).

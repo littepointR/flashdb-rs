@@ -14,15 +14,15 @@ on the same MCU; 11 acceptance checks, exit status 0):
 
 | metric | C FlashDB | Rust (final config) | delta |
 |---|---:|---:|---:|
-| ROM (text+rodata+data) | 13 360 B | **13 304 B** | **−56 B (−0.4 %)** |
+| ROM (text+rodata+data) | 13 360 B | **13 204 B** | **−156 B (−1.2 %)** |
 | static RAM (data+bss) | 1 072 B | **640 B** | −432 B (−40.3 %) |
 | stack high-water | 1 240 B | **1 080 B** | −160 B (−12.9 %) |
 | static + stack RAM | 2 312 B | **1 720 B** | −592 B (−25.6 %) |
-| cycles mount | 521 628 | **274 982** | −47.3 % |
-| cycles KV (set/update/churn/get/iterate) | 34 398 791 | **21 780 634** | −36.7 % |
-| cycles TS (append/iterate) | 391 386 | **347 267** | −11.3 % |
-| cycles rollover (1 200 appends + remount) | 2 554 303 | **2 086 645** | −18.3 % |
-| cycles total | 38 160 832 | **24 811 950** | −35.0 % |
+| cycles mount | 521 661 | **274 820** | −47.3 % |
+| cycles KV (set/update/churn/get/iterate) | 34 398 940 | **21 600 093** | −37.2 % |
+| cycles TS (append/iterate) | 391 359 | **344 469** | −12.0 % |
+| cycles rollover (1 200 appends + remount) | 2 554 333 | **2 075 206** | −18.8 % |
+| cycles total | 38 160 997 | **24 616 989** | −35.5 % |
 
 All 21 logical `RESULT` fields are identical (workload counts/checksums,
 rollover window/erases/recovery, both raw-partition FNV checksums, `rc`), and
@@ -37,10 +37,17 @@ Final configuration (all reproducible from the repo):
 * `-C llvm-args=-inline-threshold=50` (see §2 — the decisive build knob),
 * `board-u545` firmware with the RAM NOR simulator (the workload is C-identical).
 
-The ROM win comes from `.text` still being larger than C's (12 452 B vs
-11 168 B) being offset by the smaller `.rodata` (852 B vs 2 136 B: 64-byte
-`small-crc` table vs C's 1 KiB table, and shorter label strings). Stack and CPU
-are now clearly ahead.
+The stable `size`+`small-crc` build measures 13 228 B with the same cycle total
+(24 714 339 / −35.2 %). The ROM win comes from `.text` still being larger than
+C's (12 352 B vs 11 168 B) being offset by the smaller `.rodata` (852 B vs
+2 136 B: 64-byte `small-crc` table vs C's 1 KiB table, and shorter label
+strings). Stack and CPU are clearly ahead. Two fixes landed after the earlier
+optimisation checkpoints and explain the last ~110 B: the `WRITE_GRAN>8`
+C-compat status-granule encoding (`low.rs`, also removes a branch) and the
+`Kvdb::check()` recovery invariant. The two optional nightly flags
+`-Z build-std-features=optimize_for_size` and `--lto-O3` were re-measured on the
+final tree: `.text` is **unchanged** (12 352 B, same as without them), so they
+are not part of the accepted configuration.
 
 ## 2. The decisive build knob: `-C llvm-args=-inline-threshold=50`
 
@@ -120,9 +127,9 @@ on the board this took TS 409 509 → 348 888 cycles and rollover
 | GC churn | 1 248 | 1 472 | **1 056** | 976 |
 | one TS append | 528 | 704 | **568** | 496 |
 | TS iterate | 568 | 784 | **768** | 656 |
-| headline (`board`, final) | **1 240** | 1 456 | **1 072** | — |
+| headline (`board`, final) | **1 240** | 1 456 | **1 080** | — |
 
-The headline improved by −384 B; the remaining `st_ts_iter`/`st_iter` excess is
+The headline improved by −376 B; the remaining `st_ts_iter`/`st_iter` excess is
 dominated by the harness's own phase-wrapper frames (~300–380 B in the `size`
 profile) plus the public `KvEntry` (88 B) that the iterator must yield — i.e.
 measurement scaffolding and public API, not library hot frames. A
@@ -133,10 +140,10 @@ measurement scaffolding and public API, not library hot frames. A
 
 * `harness/firmware/rust/main.rs` harness trim: thin-pointer print labels,
   ~100–150 B `.text` (measured budget, unlanded).
-* Nightly `-Z build-std-features=optimize_for_size` (−80 B) and LLD
-  `--lto-O3` (−48 B), compose to **−124 B** (measured at the pre-refactor
-  checkpoint; both are now selectable knobs: `-OptimizeForSize`, `-LtoO3`).
-* `.text` is still +1 276 B vs C; with `small-crc` the rodata advantage
+* Nightly `-Z build-std-features=optimize_for_size` and LLD `--lto-O3` were
+  re-measured on the final tree: **no effect** on `.text` (12 352 B either way),
+  so the previously measured −124 B is now only historical.
+* `.text` is still +1 184 B vs C; with `small-crc` the rodata advantage
   (−1 284 B) is what buys the ROM parity, so further ROM wins mean text work.
 * For cycle experiments without hardware: `scripts/fw_rust.ps1 -Cycles`
   (SysTick + QEMU `-icount`; 40 instructions/tick, deterministic; use ratios,

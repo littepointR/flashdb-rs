@@ -433,7 +433,7 @@ ROM or MCU RAM.
 
 The QEMU `-z` image is still +224 B ROM over C because its `.text` is larger;
 the `.rodata` advantage is smaller than on the board. **On real silicon the
-acceptance passes** (ROM −20 B stable / −56 B nightly) — see
+acceptance passes** (ROM −132 B stable / −156 B nightly) — see
 [`u545re/README.md`](u545re/README.md); the board is the normative footprint
 target because it includes the rollover workload and the board backend.
 
@@ -491,8 +491,8 @@ inlined by LTO into the workload wrappers, so treat it as an upper bound.
 * **ROM**: board parity achieved; QEMU `-z` is +224 B. The residual is `.text`
   (crate safe code, error plumbing, monomorphisation), which on the board is
   offset by the smaller `.rodata` (64-byte CRC table + shorter labels).
-* **CPU**: the board acceptance is faster than C in every phase (total −34.4 %
-  stable `size`, −43.0 % `release`). The QEMU cycle proxy
+* **CPU**: the board acceptance is faster than C in every phase (total −35.2 %
+  stable `size`, −44.2 % `release`). The QEMU cycle proxy
   (`scripts/fw_rust.ps1 -Cycles`, SysTick + `-icount`, 40 instructions/tick,
   deterministic) is available for A/B work without hardware; use ratios, not
   absolutes.

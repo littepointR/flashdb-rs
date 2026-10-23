@@ -1,2 +1,5 @@
-RESULT kind=endurance pe_cycles=10259 programs=338320 elapsed_cycles=480223433 budget_cycles=480000000 checksum=0x7d7afb78 errors=0 verify_ok=1 erased_ok=1 rc=0
-BOARD core_hz=4000000 acr=0x00000000 nssr=0x00000000 nscr=0x40000000 eccr=0x00000000 stack=152 stack_limit=8192 last_nssr=0x00000000
+# Real internal-flash endurance (240 s, 8 pages) - NUCLEO-U545RE-Q (2026-10-23)
+# runner: harness/firmware/u545re/run_flash_tests.ps1 -Test endurance -TimeoutSec 400
+
+RESULT kind=endurance pe_cycles=22493 pages=8 pe_p0=2812 pe_p1=2812 pe_p2=2812 pe_p3=2812 pe_p4=2812 pe_p5=2811 pe_p6=2811 pe_p7=2811 programs=740967 erases_total=22509 elapsed_cycles=960015503 budget_cycles=960000000 checksum=0x52a4a712 errors=0 verify_ok=1 erased_ok=1 rc=0
+BOARD core_hz=4000000 acr=0x00000000 nssr=0x00000000 nscr=0x40000000 eccr=0x00000000 stack=168 stack_limit=8192 last_nssr=0x00000000

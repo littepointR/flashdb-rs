@@ -1,0 +1,6 @@
+# Real internal-flash reboot soak - NUCLEO-U545RE-Q (2026-10-23)
+# runner: harness/firmware/u545re/run_flash_reboot_soak.ps1
+
+SOAK boot round=19 of 20
+RESULT kind=reboot_soak rounds=20 rounds_done=20 boots=20 resets=19 kv_sets=1280 ts_appends=400 kv_keys=8 ts_entries=217 ts_first=184 ts_last=400 checksum=0x70fb5136 errors=0 verify_ok=1 rc=0
+BOARD kv_erases=30 kv_programs=12252 ts_erases=7 ts_programs=2158 stack=3880 stack_limit=8192

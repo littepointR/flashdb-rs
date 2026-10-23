@@ -1,0 +1,315 @@
+== Rust <-> C image compatibility matrix ==
+   write granularities: 8 1 32 64 128 256
+   artifacts:           harness/results/rust_compat
+
+== build ==
+PASS  build Rust image tool
+
+== WG=8 ==
+PASS  WG8 C reference selfcheck (deterministic write + read back)
+PASS  WG8 Rust selfcheck (write twice, compare, read back)
+PASS  WG8 Rust write image
+PASS  WG8 Rust image size (32768 bytes)
+PASS  WG8 Rust selfcheck sha256 == written image sha256
+PASS  WG8 Rust read of Rust image (mount without formatting)
+PASS  WG8 Rust read(Rust image) summary == Rust write summary
+PASS  WG8 C read of Rust image (mounts cleanly)
+PASS  WG8 C read(Rust image) summary == Rust write summary
+PASS  WG8 C write image
+PASS  WG8 C image size (32768 bytes)
+PASS  WG8 C read of C image
+PASS  WG8 C read(C image) summary == C write summary
+PASS  WG8 Rust read of C image (must not format/erase it)
+PASS  WG8 Rust read(C image) summary == C write summary
+      WG8 sha256 rust: 1aa29431bbcf77790daf2eef4588c1ea81554b4d6c5fa16ec7d357ff20074f9a
+      WG8 sha256 c:    1aa29431bbcf77790daf2eef4588c1ea81554b4d6c5fa16ec7d357ff20074f9a
+PASS  WG8 image sha256 rust == C (byte-identical image)
+INFO  WG8 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=4235 read_bytes=105322 writes=3056 write_bytes=38969 erases=12 erase_bytes=49152
+      rust  TSFLASH reads=47 read_bytes=1348 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=4282 read_bytes=106670 writes=3146 write_bytes=39914 erases=16 erase_bytes=65536
+      c     KVFLASH reads=5482 read_bytes=118157 writes=3068 write_bytes=39025 erases=16 erase_bytes=65536
+      c     TSFLASH reads=8 read_bytes=352 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=5490 read_bytes=118509 writes=3158 write_bytes=39970 erases=20 erase_bytes=81920
+
+== WG=1 ==
+PASS  WG1 C reference selfcheck (deterministic write + read back)
+PASS  WG1 Rust selfcheck (write twice, compare, read back)
+PASS  WG1 Rust write image
+PASS  WG1 Rust image size (32768 bytes)
+PASS  WG1 Rust selfcheck sha256 == written image sha256
+PASS  WG1 Rust read of Rust image (mount without formatting)
+PASS  WG1 Rust read(Rust image) summary == Rust write summary
+PASS  WG1 C read of Rust image (mounts cleanly)
+PASS  WG1 C read(Rust image) summary == Rust write summary
+PASS  WG1 C write image
+PASS  WG1 C image size (32768 bytes)
+PASS  WG1 C read of C image
+PASS  WG1 C read(C image) summary == C write summary
+PASS  WG1 Rust read of C image (must not format/erase it)
+PASS  WG1 Rust read(C image) summary == C write summary
+      WG1 sha256 rust: 10e56ea078bb9de906e38439cb3e069f739c1f3cd14fc9fffd2a5276f4c74dea
+      WG1 sha256 c:    10e56ea078bb9de906e38439cb3e069f739c1f3cd14fc9fffd2a5276f4c74dea
+PASS  WG1 image sha256 rust == C (byte-identical image)
+INFO  WG1 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=4080 read_bytes=89769 writes=3028 write_bytes=38974 erases=11 erase_bytes=45056
+      rust  TSFLASH reads=47 read_bytes=1184 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=4127 read_bytes=90953 writes=3118 write_bytes=39919 erases=15 erase_bytes=61440
+      c     KVFLASH reads=5301 read_bytes=109323 writes=3032 write_bytes=39038 erases=15 erase_bytes=61440
+      c     TSFLASH reads=8 read_bytes=256 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=5309 read_bytes=109579 writes=3122 write_bytes=39983 erases=19 erase_bytes=77824
+
+== WG=32 ==
+PASS  WG32 C reference selfcheck (deterministic write + read back)
+PASS  WG32 Rust selfcheck (write twice, compare, read back)
+PASS  WG32 Rust write image
+PASS  WG32 Rust image size (32768 bytes)
+PASS  WG32 Rust selfcheck sha256 == written image sha256
+PASS  WG32 Rust read of Rust image (mount without formatting)
+PASS  WG32 Rust read(Rust image) summary == Rust write summary
+PASS  WG32 C read of Rust image (mounts cleanly)
+PASS  WG32 C read(Rust image) summary == Rust write summary
+PASS  WG32 C write image
+PASS  WG32 C image size (32768 bytes)
+PASS  WG32 C read of C image
+PASS  WG32 C read(C image) summary == C write summary
+PASS  WG32 Rust read of C image (must not format/erase it)
+PASS  WG32 Rust read(C image) summary == C write summary
+      WG32 sha256 rust: 5a2be20db38f8be1488277df4a439f364fbba060691558fe4e67f51829510e93
+      WG32 sha256 c:    5a2be20db38f8be1488277df4a439f364fbba060691558fe4e67f51829510e93
+PASS  WG32 image sha256 rust == C (byte-identical image)
+INFO  WG32 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=4212 read_bytes=142679 writes=3462 write_bytes=45508 erases=13 erase_bytes=53248
+      rust  TSFLASH reads=47 read_bytes=1840 writes=90 write_bytes=1080 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=4259 read_bytes=144519 writes=3552 write_bytes=46588 erases=17 erase_bytes=69632
+      c     KVFLASH reads=5405 read_bytes=137944 writes=3474 write_bytes=45588 erases=17 erase_bytes=69632
+      c     TSFLASH reads=8 read_bytes=640 writes=90 write_bytes=1080 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=5413 read_bytes=138584 writes=3564 write_bytes=46668 erases=21 erase_bytes=86016
+
+== WG=64 ==
+PASS  WG64 C reference selfcheck (deterministic write + read back)
+PASS  WG64 Rust selfcheck (write twice, compare, read back)
+PASS  WG64 Rust write image
+PASS  WG64 Rust image size (32768 bytes)
+PASS  WG64 Rust selfcheck sha256 == written image sha256
+PASS  WG64 Rust read of Rust image (mount without formatting)
+PASS  WG64 Rust read(Rust image) summary == Rust write summary
+PASS  WG64 C read of Rust image (mounts cleanly)
+PASS  WG64 C read(Rust image) summary == Rust write summary
+PASS  WG64 C write image
+PASS  WG64 C image size (32768 bytes)
+PASS  WG64 C read of C image
+PASS  WG64 C read(C image) summary == C write summary
+PASS  WG64 Rust read of C image (must not format/erase it)
+PASS  WG64 Rust read(C image) summary == C write summary
+      WG64 sha256 rust: acc6e3e672131c7d659bce350bb4d91702efabd1e480ebcecae59a8f5b63235f
+      WG64 sha256 c:    acc6e3e672131c7d659bce350bb4d91702efabd1e480ebcecae59a8f5b63235f
+PASS  WG64 image sha256 rust == C (byte-identical image)
+INFO  WG64 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=5081 read_bytes=256731 writes=3173 write_bytes=55880 erases=17 erase_bytes=69632
+      rust  TSFLASH reads=47 read_bytes=2880 writes=90 write_bytes=1360 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=5128 read_bytes=259611 writes=3263 write_bytes=57240 erases=21 erase_bytes=86016
+      c     KVFLASH reads=6171 read_bytes=191672 writes=3185 write_bytes=56008 erases=21 erase_bytes=86016
+      c     TSFLASH reads=8 read_bytes=1280 writes=90 write_bytes=1360 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=6179 read_bytes=192952 writes=3275 write_bytes=57368 erases=25 erase_bytes=102400
+
+== WG=128 ==
+PASS  WG128 C reference selfcheck (deterministic write + read back)
+PASS  WG128 Rust selfcheck (write twice, compare, read back)
+PASS  WG128 Rust write image
+PASS  WG128 Rust image size (32768 bytes)
+PASS  WG128 Rust selfcheck sha256 == written image sha256
+PASS  WG128 Rust read of Rust image (mount without formatting)
+PASS  WG128 Rust read(Rust image) summary == Rust write summary
+PASS  WG128 C read of Rust image (mounts cleanly)
+PASS  WG128 C read(Rust image) summary == Rust write summary
+PASS  WG128 C write image
+PASS  WG128 C image size (32768 bytes)
+PASS  WG128 C read of C image
+PASS  WG128 C read(C image) summary == C write summary
+PASS  WG128 Rust read of C image (must not format/erase it)
+PASS  WG128 Rust read(C image) summary == C write summary
+      WG128 sha256 rust: 91ba4be94d1b0869d24211b36f19a4f86b876a9fa867bd12b77217800a5576b1
+      WG128 sha256 c:    91ba4be94d1b0869d24211b36f19a4f86b876a9fa867bd12b77217800a5576b1
+PASS  WG128 image sha256 rust == C (byte-identical image)
+INFO  WG128 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=6358 read_bytes=491379 writes=3312 write_bytes=80480 erases=25 erase_bytes=102400
+      rust  TSFLASH reads=47 read_bytes=4800 writes=90 write_bytes=1760 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=6405 read_bytes=496179 writes=3402 write_bytes=82240 erases=29 erase_bytes=118784
+      c     KVFLASH reads=6871 read_bytes=293744 writes=3324 write_bytes=80672 erases=29 erase_bytes=118784
+      c     TSFLASH reads=8 read_bytes=2560 writes=90 write_bytes=1760 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=6879 read_bytes=296304 writes=3414 write_bytes=82432 erases=33 erase_bytes=135168
+
+== WG=256 ==
+XFAIL WG256 C reference selfcheck: C tool output is nondeterministic (FlashDB-C writes uninitialised log-index padding; see harness/results/rust_compat/c_wg256.selfcheck.txt)
+PASS  WG256 Rust selfcheck (write twice, compare, read back)
+PASS  WG256 Rust write image
+PASS  WG256 Rust image size (32768 bytes)
+PASS  WG256 Rust selfcheck sha256 == written image sha256
+PASS  WG256 Rust read of Rust image (mount without formatting)
+PASS  WG256 Rust read(Rust image) summary == Rust write summary
+PASS  WG256 C read of Rust image (mounts cleanly)
+PASS  WG256 C read(Rust image) summary == Rust write summary
+PASS  WG256 C write image
+PASS  WG256 C image size (32768 bytes)
+PASS  WG256 C read of C image
+PASS  WG256 C read(C image) summary == C write summary
+PASS  WG256 Rust read of C image (must not format/erase it)
+PASS  WG256 Rust read(C image) summary == C write summary
+      WG256 sha256 rust: ab3733c0b59ef8df19fc2cd9679b01c072d7b5b54fd1bfa0789b7257bdb99f73
+      WG256 sha256 c:    2e37dd3f7bb4ca694c78d46801568e1b7c8afd5764011da461fa60a0c7ab05a9
+XFAIL WG256 image sha256 rust != C: diff is PADDING-ONLY and the C image is nondeterministic (FlashDB-C writes uninitialised log-index padding; Rust writes erased 0xFF). Byte-identity is undefined on the C side for this granularity; all logical checks passed.
+      first differing byte: offset 17196 (0x432c) region=TS sector=0 offset_in_sector=812 rust=0xff c=0x00
+      total differing bytes: 400 in 20 contiguous ranges
+        17196..17215 len=  20 rust[:8]=ff ff ff ff ff ff ff ff c[:8]=00 00 00 00 c0 1f c8 bc rust=erased
+INFO  WG256 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=10139 read_bytes=1125251 writes=3989 write_bytes=142160 erases=48 erase_bytes=196608
+      rust  TSFLASH reads=48 read_bytes=9600 writes=97 write_bytes=3104 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=10187 read_bytes=1134851 writes=4086 write_bytes=145264 erases=52 erase_bytes=212992
+      c     KVFLASH reads=9278 read_bytes=546276 writes=4001 write_bytes=142544 erases=52 erase_bytes=212992
+      c     TSFLASH reads=9 read_bytes=5760 writes=97 write_bytes=3104 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=9287 read_bytes=552036 writes=4098 write_bytes=145648 erases=56 erase_bytes=229376
+
+== matrix ==
+PASS  build Rust image tool
+PASS  WG8 C reference selfcheck (deterministic write + read back)
+PASS  WG8 Rust selfcheck (write twice, compare, read back)
+PASS  WG8 Rust write image
+PASS  WG8 Rust image size (32768 bytes)
+PASS  WG8 Rust selfcheck sha256 == written image sha256
+PASS  WG8 Rust read of Rust image (mount without formatting)
+PASS  WG8 Rust read(Rust image) summary == Rust write summary
+PASS  WG8 C read of Rust image (mounts cleanly)
+PASS  WG8 C read(Rust image) summary == Rust write summary
+PASS  WG8 C write image
+PASS  WG8 C image size (32768 bytes)
+PASS  WG8 C read of C image
+PASS  WG8 C read(C image) summary == C write summary
+PASS  WG8 Rust read of C image (must not format/erase it)
+PASS  WG8 Rust read(C image) summary == C write summary
+PASS  WG8 image sha256 rust == C (byte-identical image)
+INFO  WG8 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=4235 read_bytes=105322 writes=3056 write_bytes=38969 erases=12 erase_bytes=49152
+      rust  TSFLASH reads=47 read_bytes=1348 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=4282 read_bytes=106670 writes=3146 write_bytes=39914 erases=16 erase_bytes=65536
+      c     KVFLASH reads=5482 read_bytes=118157 writes=3068 write_bytes=39025 erases=16 erase_bytes=65536
+      c     TSFLASH reads=8 read_bytes=352 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=5490 read_bytes=118509 writes=3158 write_bytes=39970 erases=20 erase_bytes=81920
+PASS  WG1 C reference selfcheck (deterministic write + read back)
+PASS  WG1 Rust selfcheck (write twice, compare, read back)
+PASS  WG1 Rust write image
+PASS  WG1 Rust image size (32768 bytes)
+PASS  WG1 Rust selfcheck sha256 == written image sha256
+PASS  WG1 Rust read of Rust image (mount without formatting)
+PASS  WG1 Rust read(Rust image) summary == Rust write summary
+PASS  WG1 C read of Rust image (mounts cleanly)
+PASS  WG1 C read(Rust image) summary == Rust write summary
+PASS  WG1 C write image
+PASS  WG1 C image size (32768 bytes)
+PASS  WG1 C read of C image
+PASS  WG1 C read(C image) summary == C write summary
+PASS  WG1 Rust read of C image (must not format/erase it)
+PASS  WG1 Rust read(C image) summary == C write summary
+PASS  WG1 image sha256 rust == C (byte-identical image)
+INFO  WG1 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=4080 read_bytes=89769 writes=3028 write_bytes=38974 erases=11 erase_bytes=45056
+      rust  TSFLASH reads=47 read_bytes=1184 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=4127 read_bytes=90953 writes=3118 write_bytes=39919 erases=15 erase_bytes=61440
+      c     KVFLASH reads=5301 read_bytes=109323 writes=3032 write_bytes=39038 erases=15 erase_bytes=61440
+      c     TSFLASH reads=8 read_bytes=256 writes=90 write_bytes=945 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=5309 read_bytes=109579 writes=3122 write_bytes=39983 erases=19 erase_bytes=77824
+PASS  WG32 C reference selfcheck (deterministic write + read back)
+PASS  WG32 Rust selfcheck (write twice, compare, read back)
+PASS  WG32 Rust write image
+PASS  WG32 Rust image size (32768 bytes)
+PASS  WG32 Rust selfcheck sha256 == written image sha256
+PASS  WG32 Rust read of Rust image (mount without formatting)
+PASS  WG32 Rust read(Rust image) summary == Rust write summary
+PASS  WG32 C read of Rust image (mounts cleanly)
+PASS  WG32 C read(Rust image) summary == Rust write summary
+PASS  WG32 C write image
+PASS  WG32 C image size (32768 bytes)
+PASS  WG32 C read of C image
+PASS  WG32 C read(C image) summary == C write summary
+PASS  WG32 Rust read of C image (must not format/erase it)
+PASS  WG32 Rust read(C image) summary == C write summary
+PASS  WG32 image sha256 rust == C (byte-identical image)
+INFO  WG32 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=4212 read_bytes=142679 writes=3462 write_bytes=45508 erases=13 erase_bytes=53248
+      rust  TSFLASH reads=47 read_bytes=1840 writes=90 write_bytes=1080 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=4259 read_bytes=144519 writes=3552 write_bytes=46588 erases=17 erase_bytes=69632
+      c     KVFLASH reads=5405 read_bytes=137944 writes=3474 write_bytes=45588 erases=17 erase_bytes=69632
+      c     TSFLASH reads=8 read_bytes=640 writes=90 write_bytes=1080 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=5413 read_bytes=138584 writes=3564 write_bytes=46668 erases=21 erase_bytes=86016
+PASS  WG64 C reference selfcheck (deterministic write + read back)
+PASS  WG64 Rust selfcheck (write twice, compare, read back)
+PASS  WG64 Rust write image
+PASS  WG64 Rust image size (32768 bytes)
+PASS  WG64 Rust selfcheck sha256 == written image sha256
+PASS  WG64 Rust read of Rust image (mount without formatting)
+PASS  WG64 Rust read(Rust image) summary == Rust write summary
+PASS  WG64 C read of Rust image (mounts cleanly)
+PASS  WG64 C read(Rust image) summary == Rust write summary
+PASS  WG64 C write image
+PASS  WG64 C image size (32768 bytes)
+PASS  WG64 C read of C image
+PASS  WG64 C read(C image) summary == C write summary
+PASS  WG64 Rust read of C image (must not format/erase it)
+PASS  WG64 Rust read(C image) summary == C write summary
+PASS  WG64 image sha256 rust == C (byte-identical image)
+INFO  WG64 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=5081 read_bytes=256731 writes=3173 write_bytes=55880 erases=17 erase_bytes=69632
+      rust  TSFLASH reads=47 read_bytes=2880 writes=90 write_bytes=1360 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=5128 read_bytes=259611 writes=3263 write_bytes=57240 erases=21 erase_bytes=86016
+      c     KVFLASH reads=6171 read_bytes=191672 writes=3185 write_bytes=56008 erases=21 erase_bytes=86016
+      c     TSFLASH reads=8 read_bytes=1280 writes=90 write_bytes=1360 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=6179 read_bytes=192952 writes=3275 write_bytes=57368 erases=25 erase_bytes=102400
+PASS  WG128 C reference selfcheck (deterministic write + read back)
+PASS  WG128 Rust selfcheck (write twice, compare, read back)
+PASS  WG128 Rust write image
+PASS  WG128 Rust image size (32768 bytes)
+PASS  WG128 Rust selfcheck sha256 == written image sha256
+PASS  WG128 Rust read of Rust image (mount without formatting)
+PASS  WG128 Rust read(Rust image) summary == Rust write summary
+PASS  WG128 C read of Rust image (mounts cleanly)
+PASS  WG128 C read(Rust image) summary == Rust write summary
+PASS  WG128 C write image
+PASS  WG128 C image size (32768 bytes)
+PASS  WG128 C read of C image
+PASS  WG128 C read(C image) summary == C write summary
+PASS  WG128 Rust read of C image (must not format/erase it)
+PASS  WG128 Rust read(C image) summary == C write summary
+PASS  WG128 image sha256 rust == C (byte-identical image)
+INFO  WG128 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=6358 read_bytes=491379 writes=3312 write_bytes=80480 erases=25 erase_bytes=102400
+      rust  TSFLASH reads=47 read_bytes=4800 writes=90 write_bytes=1760 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=6405 read_bytes=496179 writes=3402 write_bytes=82240 erases=29 erase_bytes=118784
+      c     KVFLASH reads=6871 read_bytes=293744 writes=3324 write_bytes=80672 erases=29 erase_bytes=118784
+      c     TSFLASH reads=8 read_bytes=2560 writes=90 write_bytes=1760 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=6879 read_bytes=296304 writes=3414 write_bytes=82432 erases=33 erase_bytes=135168
+XFAIL WG256 C reference selfcheck: C tool output is nondeterministic (FlashDB-C writes uninitialised log-index padding; see harness/results/rust_compat/c_wg256.selfcheck.txt)
+PASS  WG256 Rust selfcheck (write twice, compare, read back)
+PASS  WG256 Rust write image
+PASS  WG256 Rust image size (32768 bytes)
+PASS  WG256 Rust selfcheck sha256 == written image sha256
+PASS  WG256 Rust read of Rust image (mount without formatting)
+PASS  WG256 Rust read(Rust image) summary == Rust write summary
+PASS  WG256 C read of Rust image (mounts cleanly)
+PASS  WG256 C read(Rust image) summary == Rust write summary
+PASS  WG256 C write image
+PASS  WG256 C image size (32768 bytes)
+PASS  WG256 C read of C image
+PASS  WG256 C read(C image) summary == C write summary
+PASS  WG256 Rust read of C image (must not format/erase it)
+PASS  WG256 Rust read(C image) summary == C write summary
+XFAIL WG256 image sha256 rust != C: diff is PADDING-ONLY and the C image is nondeterministic (FlashDB-C writes uninitialised log-index padding; Rust writes erased 0xFF). Byte-identity is undefined on the C side for this granularity; all logical checks passed.
+INFO  WG256 flash op counters (informational, not a pass criterion):
+      rust  KVFLASH reads=10139 read_bytes=1125251 writes=3989 write_bytes=142160 erases=48 erase_bytes=196608
+      rust  TSFLASH reads=48 read_bytes=9600 writes=97 write_bytes=3104 erases=4 erase_bytes=16384
+      rust  IMAGEFLASH reads=10187 read_bytes=1134851 writes=4086 write_bytes=145264 erases=52 erase_bytes=212992
+      c     KVFLASH reads=9278 read_bytes=546276 writes=4001 write_bytes=142544 erases=52 erase_bytes=212992
+      c     TSFLASH reads=9 read_bytes=5760 writes=97 write_bytes=3104 erases=4 erase_bytes=16384
+      c     IMAGEFLASH reads=9287 read_bytes=552036 writes=4098 write_bytes=145648 erases=56 erase_bytes=229376
+
+rust_compat: 95/97 checks passed (2 expected XFAIL, 0 failed)
+rust_compat: OK (all enforced checks passed; Rust and C images are byte-identical except for documented C-reference XFAILs)

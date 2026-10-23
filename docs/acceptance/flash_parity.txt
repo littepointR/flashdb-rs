@@ -1,0 +1,8 @@
+# Real internal-flash image parity - NUCLEO-U545RE-Q (2026-10-23)
+# runner: harness/firmware/u545re/run_flash_parity.ps1
+# geometry: KV 4x8 KiB @0x0803_0000, TS 4x8 KiB @0x0803_8000, WRITE_GRAN=128
+
+RESULT kind=flashparity kv_entries=41 kv_checksum=0xe271b9e1 ts_entries=120 ts_checksum=0x43bc2d05 kv_image_fnv=0x199f5d76 ts_image_fnv=0x481067fb stack=3832 stack_limit=8192 errors=0 verify_ok=1 rc=0
+BOARD core_hz=4000000 wg=128
+
+PASS: real internal-flash image is byte-identical to the host model (6/6 fields + rc/errors/verify_ok)

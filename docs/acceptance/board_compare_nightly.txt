@@ -2,33 +2,33 @@
 ===============================================================
  C FlashDB vs Rust flashdb -- NUCLEO-U545RE-Q (STM32U545RE)
 ===============================================================
- C image    : harness\firmware\build\c_u545\fw_c_u545.elf
- Rust image : harness\firmware\build\u545re\fw_rust_u545re_size_nightly.elf (size, nightly build-std, inline-threshold=50)
+ C image    : D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\c_u545\fw_c_u545.elf
+ Rust image : D:\littepoint\Documents\WorkingSpace\things\flashdb-rs\harness\firmware\build\u545re\fw_rust_u545re_size_nightly.elf (size, nightly build-std, inline-threshold=50)
  logical    : prints sent to the same NOR simulator, same workload
 
 metric                          C FlashDB           Rust        Rust vs C
 --------------------------    -----------    -----------    -------------
-ROM (text+rodata+data) B            13360          13304       -56 (  -0.4%)
+ROM (text+rodata+data) B            13360          13204      -156 (  -1.2%)
 static RAM (data+bss) B              1072            640      -432 ( -40.3%)
 stack high-water B                   1240           1080      -160 ( -12.9%)
 static+stack RAM B                   2312           1720      -592 ( -25.6%)
-cycles mount                       521628         274982   -246646 ( -47.3%)
-cycles KV                        34398791       21780634 -12618157 ( -36.7%)
-cycles TS                          391386         347267    -44119 ( -11.3%)
-cycles rollover                   2554303        2086645   -467658 ( -18.3%)
-cycles total                     38160832       24811950 -13348882 ( -35.0%)
+cycles mount                       521670         274820   -246850 ( -47.3%)
+cycles KV                        34398940       21600093 -12798847 ( -37.2%)
+cycles TS                          391359         344469    -46890 ( -12.0%)
+cycles rollover                   2554350        2075206   -479144 ( -18.8%)
+cycles total                     38161020       24616989 -13544031 ( -35.5%)
 
 -- acceptance --
   [PASS] workload results identical to C: 21 fields, checksums included
-  [PASS] ROM (text+rodata+data) B at least as good as C: 13304 vs 13360
+  [PASS] ROM (text+rodata+data) B at least as good as C: 13204 vs 13360
   [PASS] static RAM (data+bss) B at least as good as C: 640 vs 1072
   [PASS] stack high-water B at least as good as C: 1080 vs 1240
   [PASS] static+stack RAM B at least as good as C: 1720 vs 2312
-  [PASS] cycles mount at least as good as C: 274982 vs 521628
-  [PASS] cycles KV at least as good as C: 21780634 vs 34398791
-  [PASS] cycles TS at least as good as C: 347267 vs 391386
-  [PASS] cycles rollover at least as good as C: 2086645 vs 2554303
-  [PASS] cycles total at least as good as C: 24811950 vs 38160832
+  [PASS] cycles mount at least as good as C: 274820 vs 521670
+  [PASS] cycles KV at least as good as C: 21600093 vs 34398940
+  [PASS] cycles TS at least as good as C: 344469 vs 391359
+  [PASS] cycles rollover at least as good as C: 2075206 vs 2554350
+  [PASS] cycles total at least as good as C: 24616989 vs 38161020
   [PASS] both images report the same clock: C=4000000 Rust=4000000
 
 VERDICT: PASS -- on identical silicon the Rust image is at least as good
