@@ -100,6 +100,10 @@ pub struct RamFlash<const SIZE: usize, const WG: u32> {
     op_index: u64,
     /// If set, only *writes* count towards the injected fault.
     fault_writes_only: bool,
+    /// When set, a write/erase fault applies this many prefix bytes before
+    /// returning `SimError::Injected` (simulating a mid-program or mid-erase
+    /// power cut).
+    tear_bytes: Option<usize>,
 }
 
 impl<const SIZE: usize, const WG: u32> RamFlash<SIZE, WG> {
@@ -121,6 +125,7 @@ impl<const SIZE: usize, const WG: u32> RamFlash<SIZE, WG> {
             fail_at_op: None,
             op_index: 0,
             fault_writes_only: false,
+            tear_bytes: None,
         }
     }
 
@@ -144,6 +149,12 @@ impl<const SIZE: usize, const WG: u32> RamFlash<SIZE, WG> {
         &self.data
     }
 
+    /// Mutable access to the raw simulated flash bytes (for crafting damaged
+    /// or partially-erased images in tests).
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     /// Erase-block size in bytes, as configured in [`RamFlash::new`].
     pub fn erase_size(&self) -> u32 {
         self.erase_size
@@ -163,17 +174,29 @@ impl<const SIZE: usize, const WG: u32> RamFlash<SIZE, WG> {
     pub fn fail_after_ops(&mut self, n: u64) {
         self.fail_at_op = Some(self.op_index + n);
         self.fault_writes_only = false;
+        self.tear_bytes = None;
     }
 
     /// Arm fault injection: the `n`-th *write or erase* from now on fails.
     pub fn fail_after_writes(&mut self, n: u64) {
         self.fail_at_op = Some(self.op_index + n);
         self.fault_writes_only = true;
+        self.tear_bytes = None;
+    }
+
+    /// Arm torn fault injection: when the `n`-th operation from now on is a
+    /// write or erase, apply the first `tear_bytes` of the operation and then
+    /// fail with [`SimError::Injected`].
+    pub fn fail_torn_after_writes(&mut self, n: u64, tear_bytes: usize) {
+        self.fail_at_op = Some(self.op_index + n);
+        self.fault_writes_only = true;
+        self.tear_bytes = Some(tear_bytes);
     }
 
     /// Disarm fault injection (the next operations succeed again).
     pub fn disarm_fault(&mut self) {
         self.fail_at_op = None;
+        self.tear_bytes = None;
     }
 
     /// Number of flash operations performed since reset.
@@ -219,10 +242,35 @@ impl<const SIZE: usize, const WG: u32> Flash for RamFlash<SIZE, WG> {
     }
 
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), Self::Error> {
-        self.begin_op(true)?;
+        if let Err(e) = self.begin_op(true) {
+            if let Some(tear) = self.tear_bytes.take() {
+                self.check_range(addr, buf.len())?;
+                let n = if buf.len() <= 1 {
+                    0
+                } else {
+                    tear.clamp(1, buf.len() - 1)
+                };
+                let start = addr as usize;
+                for i in 0..n {
+                    self.data[start + i] &= buf[i];
+                }
+            }
+            return Err(e);
+        }
         self.check_range(addr, buf.len())?;
-        if self.strict_write && buf.len() % min_granule_bytes(WG) != 0 {
-            return Err(SimError::UnalignedWrite);
+        let gran = min_granule_bytes(WG);
+        if self.strict_write {
+            if addr as usize % gran != 0 || buf.len() % gran != 0 {
+                return Err(SimError::UnalignedWrite);
+            }
+            if WG >= 8 {
+                let start = addr as usize;
+                for chunk in self.data[start..start + buf.len()].chunks(gran) {
+                    if chunk.iter().any(|&b| b != 0xFF) {
+                        return Err(SimError::UnalignedWrite);
+                    }
+                }
+            }
         }
         let start = addr as usize;
         let mut changed = 0u64;
@@ -241,7 +289,15 @@ impl<const SIZE: usize, const WG: u32> Flash for RamFlash<SIZE, WG> {
     }
 
     fn erase(&mut self, addr: u32, len: u32) -> Result<(), Self::Error> {
-        self.begin_op(true)?;
+        if let Err(e) = self.begin_op(true) {
+            if let Some(tear) = self.tear_bytes.take() {
+                self.check_range(addr, len as usize)?;
+                let n = tear.min(len as usize);
+                let start = addr as usize;
+                self.data[start..start + n].fill(0xFF);
+            }
+            return Err(e);
+        }
         self.check_range(addr, len as usize)?;
         let er = self.erase_size as u64;
         if addr as u64 % er != 0 || len as u64 % er != 0 {

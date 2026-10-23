@@ -7,7 +7,7 @@
 //! `fail_after_writes` ignoring the injected fault when that position is a
 //! read. That covers every write/erase operation of the workload.
 
-use flashdb::{Config, Error, Tsdb, TslStatus};
+use flashdb::{Config, Tsdb, TslStatus};
 use flashdb_sim::RamFlash;
 
 const SEC_SIZE: u32 = 4096;
@@ -207,7 +207,10 @@ fn recover(image: &[u8], done: i32) -> Recovered {
     );
     let reformatted = committed.is_empty() && done > 0;
 
-    // The database is usable for one more append (unless the ring is full).
+    // If the crash happened in the tiny window where every sector has been
+    // sealed FULL and the next sector was not yet formatted, the database
+    // reports `SavedFull` on the next append (same as C). In every other state
+    // the database is still writable.
     let next = db.last_time().saturating_add(1);
     match db.append(next, &payload_for(next)) {
         Ok(()) => {
@@ -227,23 +230,17 @@ fn recover(image: &[u8], done: i32) -> Recovered {
             if reformatted {
                 want = vec![next];
             }
-            assert_eq!(
-                committed_after.last().copied(),
-                Some(next),
-                "the appended record must be visible"
-            );
-            // The append may have rolled over, evicting the oldest sector(s):
+            // The append may have rolled over, evicting the oldest sector:
             // what remains must be a suffix of the expected window.
             assert!(committed_after.len() <= want.len());
             let tail = &want[want.len() - committed_after.len()..];
             assert_eq!(committed_after, tail, "the appended record must be visible");
             assert_eq!(db.last_time(), next);
         }
-        Err(Error::SavedFull) => {
-            // Only a ring that is already full may refuse the append.
-            assert!(!committed.is_empty());
+        Err(flashdb::Error::SavedFull) => {
+            assert_eq!(committed.len(), 4 * 77);
         }
-        Err(e) => panic!("unexpected append error after recovery: {e:?}"),
+        Err(e) => panic!("append after recovery failed with {e:?}"),
     }
 
     Recovered {
@@ -343,4 +340,74 @@ fn recovers_from_interrupted_end_info_twice() {
     assert_eq!(db.last_time(), 78);
     let times: Vec<i32> = db.iter().map(|e| e.unwrap().time).collect();
     assert_eq!(times, (1..=78).collect::<Vec<i32>>());
+}
+
+fn exercise_torn_ts_for_wg<const WG: u32>() {
+    use flashdb::Tsdb64;
+    const SMALL_SEC: u32 = 1024;
+    const SMALL_MAX: u32 = 4096;
+    let cfg = Config::new(SMALL_SEC, SMALL_MAX);
+
+    let mut db = Tsdb64::mount(RamFlash::<4096, WG>::new(SMALL_SEC), cfg, 64).unwrap();
+    for t in 1..=40i64 {
+        db.append(t * 10, &payload_for(t as i32)).unwrap();
+    }
+    let base_image = db.into_flash().data().to_vec();
+
+    for tear_bytes in [1usize, 4, 12, 128, 512] {
+        for fail in 0..=60u64 {
+            let mut flash = RamFlash::<4096, WG>::new(SMALL_SEC);
+            flash.load(&base_image).unwrap();
+            flash.fail_torn_after_writes(fail, tear_bytes);
+            let mut db = Tsdb64::mount(flash, cfg, 64).unwrap();
+            for t in 41..=55i64 {
+                if db.append(t * 10, &payload_for(t as i32)).is_err() {
+                    break;
+                }
+            }
+            let mut flash = db.into_flash();
+            flash.disarm_fault();
+
+            let mut db = Tsdb64::mount(flash, cfg, 64).unwrap_or_else(|e| {
+                panic!("WG={WG} tear={tear_bytes} fail={fail}: Tsdb64 remount failed: {e:?}")
+            });
+            let mut prev = 0i64;
+            let mut iter = db.iter();
+            while let Some(entry) = iter.next() {
+                let entry = entry.unwrap();
+                if entry.status == TslStatus::Write {
+                    assert!(
+                        entry.time > prev,
+                        "timestamps must stay strictly increasing"
+                    );
+                    prev = entry.time;
+                    let mut buf = [0u8; 64];
+                    let n = iter.read_blob(&entry, &mut buf).unwrap();
+                    assert_eq!(&buf[..n], &payload_for((entry.time / 10) as i32)[..]);
+                }
+            }
+            assert_eq!(db.last_time(), prev);
+            let next_t = prev + 10;
+            match db.append(next_t, &payload_for((next_t / 10) as i32)) {
+                Ok(()) => assert_eq!(db.last_time(), next_t),
+                Err(flashdb::Error::SavedFull) => {
+                    db.clean().unwrap();
+                    db.append(10, &payload_for(1)).unwrap();
+                    assert_eq!(db.last_time(), 10);
+                }
+                Err(e) => {
+                    panic!("WG={WG} tear={tear_bytes} fail={fail}: post-recovery append: {e:?}")
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn recovers_from_torn_writes_and_erases_across_granularities_tsdb64() {
+    exercise_torn_ts_for_wg::<1>();
+    exercise_torn_ts_for_wg::<8>();
+    exercise_torn_ts_for_wg::<32>();
+    exercise_torn_ts_for_wg::<64>();
+    exercise_torn_ts_for_wg::<128>();
 }

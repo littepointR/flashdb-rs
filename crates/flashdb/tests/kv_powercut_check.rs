@@ -78,11 +78,102 @@ fn sweep<const WG: u32>() {
 }
 
 #[test]
+fn power_cut_torn_header_is_not_corruption_wg1() {
+    sweep::<1>();
+}
+
+#[test]
 fn power_cut_torn_header_is_not_corruption_wg8() {
     sweep::<8>();
 }
 
 #[test]
+fn power_cut_torn_header_is_not_corruption_wg32() {
+    sweep::<32>();
+}
+
+#[test]
+fn power_cut_torn_header_is_not_corruption_wg64() {
+    sweep::<64>();
+}
+
+#[test]
 fn power_cut_torn_header_is_not_corruption_wg128() {
     sweep::<128>();
+}
+
+#[test]
+fn power_cut_torn_header_is_not_corruption_wg256() {
+    sweep::<256>();
+}
+
+/// Interrupt updates and GC sector erases with *partial* (torn) writes and
+/// erases across write granularities, then verify remount + `check()` + writes.
+fn sweep_torn_writes_and_gc<const WG: u32>() {
+    // 4 sectors of 1 KiB = 4 KiB partition so GC and sector erases happen quickly.
+    const SMALL_SEC: u32 = 1024;
+    const SMALL_MAX: u32 = 4096;
+    let small_cfg = Config::new(SMALL_SEC, SMALL_MAX);
+
+    let mut db = Kvdb::mount(RamFlash::<4096, WG>::new(SMALL_SEC), small_cfg).unwrap();
+    // Fill enough records and updates that the next update triggers GC + erase.
+    for round in 0..3u32 {
+        for i in 0..4u32 {
+            db.set(&key(i), &value(round * 10 + i)).unwrap();
+        }
+    }
+    let image = db.into_flash().data().to_vec();
+
+    for tear_bytes in [1usize, 5, 13, 64, 512] {
+        for fail in 0..=180u64 {
+            let mut flash = RamFlash::<4096, WG>::new(SMALL_SEC);
+            flash.set_strict_write(WG >= 8 && WG <= 128);
+            flash.load(&image).unwrap();
+            flash.fail_torn_after_writes(fail, tear_bytes);
+            let mut db = Kvdb::mount(flash, small_cfg).unwrap();
+            for i in 0..4u32 {
+                if db.set(&key(i), &value(100 + i)).is_err() {
+                    break;
+                }
+            }
+            let mut flash = db.into_flash();
+            flash.disarm_fault();
+
+            let mut db = Kvdb::mount(flash, small_cfg).unwrap_or_else(|e| {
+                panic!("WG={WG} tear={tear_bytes} fail={fail}: remount failed: {e:?}")
+            });
+            db.check().unwrap_or_else(|e| {
+                panic!("WG={WG} tear={tear_bytes} fail={fail}: check() failed: {e:?}")
+            });
+            // Every key 0..4 must still exist with either its pre-update or post-update value.
+            for i in 0..4u32 {
+                let mut buf = [0u8; 24];
+                let n = db.get(&key(i), &mut buf).unwrap_or_else(|e| {
+                    panic!("WG={WG} tear={tear_bytes} fail={fail}: get({i}) failed: {e:?}")
+                });
+                assert_eq!(
+                    n,
+                    Some(24),
+                    "WG={WG} tear={tear_bytes} fail={fail}: key {i} missing"
+                );
+                assert!(
+                    buf == value(20 + i) || buf == value(100 + i),
+                    "WG={WG} tear={tear_bytes} fail={fail}: unexpected value for key {i}"
+                );
+            }
+            db.set(&key(0), &value(200)).unwrap_or_else(|e| {
+                panic!("WG={WG} tear={tear_bytes} fail={fail}: post-recovery set failed: {e:?}")
+            });
+            db.check().unwrap();
+        }
+    }
+}
+
+#[test]
+fn power_cut_torn_writes_and_gc_erases_all_wg() {
+    sweep_torn_writes_and_gc::<1>();
+    sweep_torn_writes_and_gc::<8>();
+    sweep_torn_writes_and_gc::<32>();
+    sweep_torn_writes_and_gc::<64>();
+    sweep_torn_writes_and_gc::<128>();
 }
