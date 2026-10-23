@@ -11,32 +11,33 @@ wherever possible so results are comparable across layers.
 | 3. Differential host tests | C and Rust produce byte-identical flash images for **all six** write granularities and identical op counts | `scripts/rust_compat.sh`, `scripts/compare_bench.py` |
 | 4. QEMU firmware comparison | ROM / static RAM / stack / workload checksums of the two firmware images on a Cortex-M3 | `scripts/fw_c.sh`, `scripts/fw_rust.sh` |
 | 5. On-silicon acceptance (NUCLEO-U545RE-Q) | the real crate on a Cortex-M33: identical 21-field workload output, on-flash image identity, RAM/ROM/stack and DWT cycles, C vs Rust | `harness/firmware/u545re/compare.ps1` |
-| 6. On-silicon **real internal flash** | real 8 KiB page erase + 128-bit quad-word programming: image parity, power-loss injection, reboot soak, endurance, KVDB/TSDB long-run | `harness/firmware/u545re/{run_flash_parity,run_flash_fault,run_flash_reboot_soak,run_flash_tests}.ps1` |
+| 6. On-silicon **real internal flash** | real 8 KiB page erase + 128-bit quad-word programming: image parity, power-loss injection, deterministic mid-erase reset injection, reboot soak, endurance, KVDB/TSDB long-run | `harness/firmware/u545re/{run_flash_parity,run_flash_fault,run_flash_erase_fault,run_flash_reboot_soak,run_flash_tests}.ps1` |
 | 7. CI | fmt, workspace tests (default + `std`), rustdoc `-D warnings`, QEMU firmware build, and a manual self-hosted hardware workflow | `.github/workflows/ci.yml`, `.github/workflows/hardware.yml` |
 
 ## Host test suite
 
-`cargo test -p flashdb --release` → **128 test functions + 7 doctests = 135
+`cargo test -p flashdb --release` → **144 test functions + 9 doctests = 153
 tests**, plus **3 `#[ignore]`d long-run / large-data stress tests**
 (`long_run.rs`, see below). `--features std` adds one more test (the
 `std::error::Error` leaf).
 
 | file | tests | covers |
 |---|---:|---|
-| `src/lib.rs` unit tests | 6 | low-level decode helpers, CRC path |
+| `src/lib.rs` unit tests | 9 | low-level decode helpers, CRC path, `storage` bounds/alignment/status across all 6 write granularities |
 | `kv_smoke.rs` | 7 | set/get/update/delete/iterate, stats, power-cut sweep on KV ops |
 | `kv_formats.rs` | 7 | every supported write granularity mounts/serves the same data |
 | `kvdb_c_parity.rs` | 17 | C test cases ported assertion-for-assertion + C-generated images |
 | `error_paths.rs` | 39 | every-flash-op fault sweeps with typed `FlashRead/Write/Erase`, config/driver rejection, invalid names/values, corrupted and damaged images, KV PreWrite/PreDelete/GC recovery, cache hash collisions, padded-granule reads, TS forged sector states, 64/128/256-bit granularities, iterator boundary errors |
-| `kv_powercut_check.rs` | 2 | after a reset at **every** flash op of a KV update, remount + `Kvdb::check()` + get + write all succeed (torn `PRE_WRITE`/`ERR_HDR` headers are not corruption) |
+| `features_and_model.rs` | 7 | `Config::not_formattable`, `Kvdb::auto_update`, segmented `read_value_at` / `read_blob_at`, `Partition<F>`, and randomised state-machine model checks (`KvdbImpl` vs `BTreeMap` across `WG=1..256` and `CACHE=0..128` with torn-write faults; `Tsdb64` vs reference log across `WG=1..256`) |
+| `kv_powercut_check.rs` | 7 | after a reset at **every** flash op of a KV update across all 6 write granularities (`1, 8, 32, 64, 128, 256`) plus torn-write and GC torn-erase sweeps with strict write-once-per-granule checking, remount + `Kvdb::check()` + get + write all succeed |
 | `tsdb_format.rs` | 15 | sector headers, rollover default, full-with-rollover-off |
 | `tsdb_iter.rs` | 8 | forward / reverse / by-time iterators, deleted records, boundaries |
 | `tsdb_rollover.rs` | 5 | ring live window, sector `end_info` bytes, 10 wraps, by-time across the wrap, full no-rollover DB |
-| `tsdb_recovery.rs` | 3 | power cut at **every** write (no wrap, across a wrap), interrupted `end_info` twice |
+| `tsdb_recovery.rs` | 4 | power cut at **every** write (no wrap, across a wrap), interrupted `end_info` twice, plus torn-write/torn-erase sweeps across `WG=1, 8, 32, 64, 128` on `Tsdb64` |
 | `tsdb_c_parity.rs` | 15 | C/Rust image + summary parity for TS workflows |
 | `error_surface.rs` | 4 (+1 with `--features std`) | every `Error` variant's text, driver-error passthrough, `Error` traits, `std::error::Error` leaf |
 | `long_run.rs` | 3 (**ignored** by default) | long-run soak + large-data: 100 k KV updates on 512 KiB, 500 TS ring wraps (154 k appends), 256 KiB/1 MiB partitions with 4 KiB values |
-| doctests | 7 | documented API examples |
+| doctests | 9 | documented API examples (including `Config`, `Partition`, `mount_into`) |
 
 ### Coverage
 
@@ -46,18 +47,17 @@ numbers (the total includes the extra `std` leaf test).
 
 | file | lines | functions | regions |
 |---|---:|---:|---:|
-| `error.rs` | 100.00 % (13) | 100 % | 100 % |
-| `flash.rs` | 100.00 % (9) | 100 % | 100 % |
-| `low.rs` | 96.36 % (522) | 95.83 % | 91.84 % |
-| `kvdb.rs` | 93.34 % (1441) | 100 % | 88.53 % |
-| `storage.rs` | 82.40 % (125) | 93.75 % | 72.25 % |
-| `tsdb.rs` | 94.54 % (1008) | 100 % | 88.09 % |
-| **total** | **93.84 % (3118 lines, 192 missed)** | **98.94 % (2/189)** | **87.91 %** |
+| `error.rs` | 100.00 % (13) | 100 % (1/1) | 100 % |
+| `flash.rs` | 100.00 % (33) | 100 % (11/11) | 100 % |
+| `low.rs` | 96.36 % (522) | 95.83 % (23/24) | 91.84 % |
+| `kvdb.rs` | 93.73 % (1547) | 100 % (92/92) | 89.01 % |
+| `storage.rs` | 92.54 % (228) | 100 % (25/25) | 86.73 % |
+| `tsdb.rs` | 94.73 % (1044) | 100 % (64/64) | 88.49 % |
+| **total** | **94.45 % (3387 lines, 188 missed)** | **99.54 % (216/217)** | **89.00 %** |
 
 The remaining line misses are dead/defensive branches (unreachable through the
-public driver contract), release-only artefacts (`const fn` tables, compiled-out
-`debug_assert!` code) and error variants no source path constructs
-(`OutOfBounds`, `NotFormatted`, `write_status(0)`); the exact lines are listed by
+public driver contract) and release-only artefacts (`const fn` tables,
+compiled-out `debug_assert!` code); the exact lines are listed by
 `cargo llvm-cov --open` / `--show-missing-lines`. No test-only hooks or `unsafe`
 reach-ins were added to the library.
 
@@ -151,18 +151,26 @@ region is `0x0803_0000..0x0803_FFFF`.
 |---|---|---|---|
 | image parity | `run_flash_parity.ps1` | crate writes a deterministic KV+TS image on internal flash (`WRITE_GRAN=128`, sec 8 KiB, 4+4 pages), remounts and verifies every value/payload, FNV over both raw partitions; compared with the identical workload run on the host model with strict 128-bit chunks | **PASS** — all 6 fields equal: `kv_entries=41 kv_checksum=0xe271b9e1 ts_entries=120 ts_checksum=0x43bc2d05 kv_image_fnv=0x199f5d76 ts_image_fnv=0x481067fb`, stack 3 832 B |
 | power-loss injection | `run_flash_fault.ps1` | a never-ending KV/TS writer is stopped by an **external reset** at random points inside real flash work (30 cycles seed 99 + 20 cycles seed 1234); a verifier remounts, runs `check()`, validates every generation/payload/TS window, writes again and remounts | **PASS** — 50/50 resets recovered `rc=0`; traces show resets inside program windows and between operations; `check()` required a fix (below) |
+| mid-erase reset injection | `run_flash_erase_fault.ps1` | SRAM-resident `ram_erase_and_reset` (`.data`) starts a real 8 KiB page erase on Bank 1, polls `FLASH_NSSR.BSY == 1` without AHB fetch stall, sweeps delay loops `0..512`, and triggers `SYSRESETREQ` while `BSY == 1` across 10 KVDB GC erases + 10 TSDB rollover erases; next boot handles `FLASH_ECCR.ECCD` NMIs on partially erased pages and verifies recovery | **PASS** — `rounds=20 bsy_confirmed=20 kv_erase_resets=10 ts_erase_resets=10 page_erased_after=4 page_partial_after=16 ecc_nmis=121 rc=0`; found and fixed a `do_gc` status-rewrite bug (below) |
 | reboot soak | `run_flash_reboot_soak.ps1` | 20 boots, 19 `NVIC_SystemReset`s: each boot verifies the previous round, writes 64 KV updates + 20 TS appends, resets itself; final boot verifies the complete persisted state | **PASS** — `rounds=20 boots=20 resets=19 kv_sets=1280 ts_appends=400 kv_keys=8 ts_last=400` |
 | endurance | `run_flash_tests.ps1 -Test endurance` | 240 s of page erase + full-page quad-word program + read-back verify + erase verify, rotating over all 8 scratch pages; NSSR error flags checked every cycle | **PASS** — 22 493 P/E cycles (2 811–2 812/page), 740 967 quad-word programs, 22 509 erases, 0 errors, 960 015 503 cycles @4 MHz |
 | KVDB/TSDB long-run | `run_flash_tests.ps1 -Test longrun` | 32 KiB KV + 32 KiB TS on internal flash for 60 s of mixed writes, rollover, queries and remounts, with per-round verification | **PASS** — 72 rounds, 2 336 KV sets, 3 456 TS appends, 1 405 erases, 18+18 remounts (60.95 s, stack 3 536 B), 0 errors |
 
-The power-loss test found a **recovery-contract issue** that host fault
-injection had not exercised (the host sweeps used `WRITE_GRAN=8`): after a reset
-during a KV record write, mount succeeded and the data was usable, but
-`Kvdb::check()` returned `ReadCorrupted` for the torn record that recovery had
-already quarantined. `check()` now skips exactly the two states the sector walk
-already skips for torn records (`PRE_WRITE` and recovered `ERR_HDR`) and still
-reports damage to committed records; `kv_powercut_check.rs` sweeps every flash
-op of a KV update at wg 8 and 128 as a regression test.
+The power-loss and mid-erase reset tests found **two real recovery issues** on
+128-bit ECC flash that host fault injection had not exercised:
+
+1. After a reset during a KV record write, mount succeeded and the data was
+   usable, but `Kvdb::check()` returned `ReadCorrupted` for the torn record that
+   recovery had already quarantined. `check()` now skips `PRE_WRITE` and
+   recovered `ERR_HDR` records while still reporting damage to committed records.
+2. After a mid-erase reset aborted a KVDB GC page erase before the sector header
+   was wiped, `Kvdb::mount` detected `sec.dirty == SectorDirtyStatus::Gc` and
+   resumed `do_gc`, which unconditionally called `write_status(..., Gc)` on a
+   sector whose dirty status was *already* `Gc`. On STM32U5 128-bit ECC flash,
+   re-programming an already-written status quad-word raises `NSSR_PROGERR |
+   NSSR_PGSERR` (`0x88`). `do_gc` now skips the status write when `sec.dirty` is
+   already `Gc`, and `flashdb-sim::RamFlash::set_strict_write(true)` now enforces
+   write-once-per-granule semantics across host power-cut sweeps.
 
 ### Reproducing all hardware runs
 
@@ -178,6 +186,7 @@ pwsh -NoProfile -File harness/firmware/u545re/compare.ps1 -RustProfile size -Rus
 pwsh -NoProfile -File harness/firmware/u545re/compare.ps1 -RustProfile release -RustFeatures small-crc
 pwsh -NoProfile -File harness/firmware/u545re/run_flash_parity.ps1
 pwsh -NoProfile -File harness/firmware/u545re/run_flash_fault.ps1 -Iterations 30 -Seed 99
+pwsh -NoProfile -File harness/firmware/u545re/run_flash_erase_fault.ps1
 pwsh -NoProfile -File harness/firmware/u545re/run_flash_reboot_soak.ps1
 pwsh -NoProfile -File harness/firmware/u545re/run_flash_tests.ps1 -Test endurance -TimeoutSec 400
 pwsh -NoProfile -File harness/firmware/u545re/run_flash_tests.ps1 -Test longrun -TimeoutSec 300
@@ -185,8 +194,9 @@ pwsh -NoProfile -File harness/firmware/u545re/run_flash_tests.ps1 -Test longrun 
 
 The real-flash suites are **build-time feature variants** of the same firmware
 crate (`flash-parity`, `flash-fault-write`, `flash-fault-verify`,
-`flash-reboot-soak`, `flash-endurance`, `flash-longrun`); none of them is part of
-the standard acceptance image, and each runner reflashes the board.
+`flash-erase-fault`, `flash-reboot-soak`, `flash-endurance`, `flash-longrun`);
+none of them is part of the standard acceptance image, and each runner reflashes
+the board.
 
 ## Continuous integration
 
@@ -214,16 +224,10 @@ physical hardware.
   datasheet-endurance qualification.
 * **Soak duration**: the longest on-silicon continuous runs are 240 s
   (endurance) and 60 s (KVDB/TSDB); no multi-hour or multi-day soak yet.
-* **Mid-erase reset injection**: the power-loss test resets the target through
-  the debug probe. Traces show resets inside quad-word **program** windows and
-  between operations, but none inside an erase window — a debug reset request
-  appears to be serviced only after the flash controller finishes the long
-  erase. Deterministic mid-erase injection needs an on-chip watchdog/RAM-ISR
-  reset source (future work).
 * **Production-grade flash driver**: the on-silicon driver lives in the test
   harness (`harness/firmware/rust/hwflash.rs`): single bank, scratch pages only,
-  no RDP/WRP/option bytes, dual-bank, ECC error retry/logging, suspend/resume or
-  DMA. The crate itself is driver-agnostic (`Flash` trait).
+  no RDP/WRP/option bytes, dual-bank, suspend/resume or DMA. The crate itself is
+  driver-agnostic (`Flash` trait).
 * **`WRITE_GRAN=256` byte identity**: FlashDB-C's own image tool is
   nondeterministic at 256 bits (uninitialised TS padding), so byte-identity is
   unprovable against this reference version; the Rust side writes erased
@@ -234,6 +238,5 @@ physical hardware.
   ROM by design (it optimises CPU, not size).
 * **CI hardware leg**: `hardware.yml` exists but no self-hosted runner is
   attached to this repository, so the hardware legs remain manual here.
-* **Coverage**: 93.84 % lines / 98.94 % functions; the remaining lines are
-  listed above and are dead defensive branches, const-eval artefacts or error
-  variants the public contract does not construct.
+* **Coverage**: 94.45 % lines / 99.54 % functions (`216/217`); the remaining
+  lines are listed above and are dead defensive branches or const-eval artefacts.

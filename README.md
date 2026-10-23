@@ -123,16 +123,21 @@ Flashing uses **probe-rs**, which programs the STM32U5 independently of the
 probe's own flash loader; the earlier OpenOCD/pyOCD probe hang does not apply to
 that path, and no ST-LINK firmware update was needed.
 
-Real internal flash (bank-1 scratch pages only) is exercised by five dedicated
+Real internal flash (bank-1 scratch pages only) is exercised by six dedicated
 images: a deterministic KV+TS image written with `WRITE_GRAN=128` is
 **byte-identical to the host model** on silicon; an external-reset
-**power-loss** injector recovers **50/50** interrupted cycles; a **20-boot/19-reset
+**power-loss** injector recovers **50/50** interrupted cycles; an SRAM-resident
+**mid-erase reset** injector (`run_flash_erase_fault.ps1`) triggers 20 system
+resets while `FLASH_NSSR.BSY == 1` inside active 8 KiB page erases (10 KVDB GC
+erases + 10 TSDB rollover erases, handling 121 hardware `FLASH_ECCR.ECCD` NMIs
+on 16 partially erased pages) and recovers **20/20** rounds; a **20-boot/19-reset
 soak** verifies persistence and remounting; 240 s of page erase/program
 **endurance** reaches **22 493 P/E cycles** on all 8 scratch pages (740 967
 quad-words, 22 509 erases, 0 errors); and a 60 s **KVDB+TSDB long-run** does
 72 rounds with 1 405 sector erases and 18+18 verified remounts (0 errors).
-The power-loss test found and fixed a `Kvdb::check()` false positive on torn
-`PRE_WRITE` headers; the host C-compat matrix also found and fixed a
+The on-silicon fault tests found and fixed both a `Kvdb::check()` false positive
+on torn `PRE_WRITE` headers and a `Kvdb::do_gc` status-granule rewrite on
+resumed GC erases; the host C-compat matrix also found and fixed a
 `WRITE_GRAN>8` status-granule mismatch (~110 B ROM side benefit). Full tables,
 reproduction commands and the exact acceptance configuration:
 [`harness/firmware/u545re/README.md`](harness/firmware/u545re/README.md); test
@@ -183,6 +188,7 @@ harness/firmware/u545re/run_rust.sh       # POSIX: build + flash + run (probe-rs
 harness/firmware/u545re/run_rust.ps1      # Windows/PowerShell: build + flash + run (probe-rs)
 harness/firmware/u545re/run_flash_parity.ps1       # real internal flash: C-model image parity
 harness/firmware/u545re/run_flash_fault.ps1        # real internal flash: power-loss injection
+harness/firmware/u545re/run_flash_erase_fault.ps1  # real internal flash: deterministic mid-erase reset
 harness/firmware/u545re/run_flash_reboot_soak.ps1  # real internal flash: 20-boot soak
 harness/firmware/u545re/run_flash_tests.ps1 -Test endurance   # real internal flash: 240 s P/E
 harness/firmware/u545re/run_flash_tests.ps1 -Test longrun     # real internal flash: 60 s DB soak

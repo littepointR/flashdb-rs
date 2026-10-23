@@ -44,11 +44,11 @@ docs in `crates/flashdb/src/*.rs` cover the details of each algorithm.
 
 | module | contents |
 |---|---|
-| `flash.rs` | `Flash` trait: `read`/`write`/`erase`, `WRITE_GRAN_BITS`, `ERASED_BYTE`. Implemented for `&mut F`, so a DB can borrow a driver. |
-| `storage.rs` | `Config` (sector size, partition size), validation, bounds-checked access, FlashDB's aligned-write and status-table primitives. |
-| `low.rs` | Byte-level format: magic words, status enums, CRC32, write-granularity layout tables extracted from the C structs, status encode/decode. |
-| `kvdb.rs` | KVDB: mount/recovery, get/set/delete, iteration, GC. |
-| `tsdb.rs` | TSDB: mount/recovery, append, forward/reverse/by-time iteration, rollover, clean. |
+| `flash.rs` | `Flash` trait (`read`/`write`/`erase`, `WRITE_GRAN_BITS`, `ERASED_BYTE`, implemented for `&mut F`) and the zero-cost `Partition<F>` sub-range adapter. |
+| `storage.rs` | `Config` (`sec_size`, `max_size`, `not_formattable`), validation, bounds-checked access, FlashDB's aligned-write and status-table primitives. |
+| `low.rs` | Byte-level format: magic words, `VER_NUM_KV_NAME`, status enums, CRC32, write-granularity layout tables extracted from the C structs, status encode/decode. |
+| `kvdb.rs` | KVDB: mount/recovery, `auto_update`, get/set/delete, full and segmented value reads (`read_value_at`), iteration, GC. |
+| `tsdb.rs` | TSDB: mount/recovery, append, forward/reverse/by-time iteration, full and segmented blob reads (`read_blob` / `read_blob_at`), rollover, clean. |
 | `error.rs` | `Error<E>` + `Result<T, E>`; `E` is `Flash::Error`. |
 
 Layering has one important consequence: the KV and TS algorithms never see a
@@ -310,11 +310,16 @@ valid data.
   are byte-identical.
 * **64-bit timestamps** are selected with the type parameter instead of a
   build macro; the resulting format matches the C option.
-* **Write granularities 64/128/256** have layout tables and algorithms, but
-  are exercised less than 1/8/32 (the common NOR / STM32 cases).
-* **`FDB_KV_AUTO_UPDATE`** (bump a stored version number and re-apply defaults)
-  is not ported as a built-in option; it is a small policy layer on top of
-  `mount_with_defaults` / `set` and is left to the application.
+* **Write granularities 1/8/32/64/128/256** all have layout tables, C-parity
+  image tests, randomised state-machine model tests and power-cut fault sweeps.
+* **`FDB_KV_AUTO_UPDATE`** is provided as explicit method
+  `KvdbImpl::auto_update(version, defaults)` (persisting `__ver_num__` as a
+  32-bit little-endian integer while also accepting 64-bit C `size_t` version
+  records) so callers can run schema migration without bundling default tables
+  into every `Kvdb` struct.
+* **`FDB_*_CTRL_SET_NOT_FORMAT`** is provided on `Config` via
+  `Config::new(...).not_formattable(true)`, returning `Error::NotFormatted` on
+  blank or header-damaged partitions instead of auto-formatting them.
 * **`fdb_kv_print` / `fdb_tsl_iter` debug printing** is replaced by iterators
   plus the user's own formatting, and `fdb_kvdb_control` lock hooks are
   unnecessary because a database is borrowed exclusively (`&mut self`).
