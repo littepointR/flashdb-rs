@@ -60,7 +60,10 @@ esac
 
 mkdir -p "$OUT_DIR" "$BUILD"
 
-FLAGS="-std=c99 -Wno-unused-parameter"
+# `-std=c99` hides the POSIX clock API on glibc (Linux/WSL); the benchmark only
+# needs the plain C99 headers plus clock_gettime(CLOCK_MONOTONIC), so request the
+# POSIX.1b feature set explicitly to build on macOS and Linux alike.
+FLAGS="-std=c99 -D_POSIX_C_SOURCE=199309L -Wno-unused-parameter"
 HOST_STR="$(uname -sm)"
 BASE_SRCS=(
     "$HARNESS/bench.c"

@@ -6,7 +6,8 @@
 #   scripts/c_image.sh read  <in.bin>  [wg] [opt]   # mount image, print summary
 #   scripts/c_image.sh selfcheck [wg] [opt]         # write twice, read back, diff
 #
-# wg:  8 (default) or 1 -- must match the FDB_WRITE_GRAN used to compile
+# wg:  8 (default), 1, 32, 64, 128 or 256 -- must match the FDB_WRITE_GRAN the
+#      tool is compiled with (all six values FlashDB-C supports)
 # opt: O2 (default) or Os
 #
 # Image format: raw 32768 bytes
@@ -72,8 +73,8 @@ case "$CMD" in
 esac
 
 case "$WG" in
-    8|1) ;;
-    *) echo "wg must be 8 or 1 (got '$WG')" >&2; exit 2 ;;
+    8|1|32|64|128|256) ;;
+    *) echo "wg must be 1, 8, 32, 64, 128 or 256 (got '$WG')" >&2; exit 2 ;;
 esac
 case "$OPT" in
     O2|Os) ;;
@@ -108,9 +109,14 @@ build_image_tool() {
     fi
     mkdir -p "$dir"
     echo "== build image_tool wg=${WG} opt=${OPT} ==" >&2
-    "$CC" -std=c99 "-$OPT" -Wall -Wextra -Wno-unused-parameter \
+    # `-std=c99` hides the POSIX clock API on glibc (Linux/WSL), and
+    # harness/c/bench_common.c references clock_gettime(CLOCK_MONOTONIC) even
+    # though the image tool never measures time; request POSIX.1b explicitly
+    # (the same flags scripts/c_bench.sh uses) so the tool also builds with
+    # WSL gcc as well as Windows clang.
+    "$CC" -std=c99 -D_POSIX_C_SOURCE=199309L "-$OPT" -Wall -Wextra -Wno-unused-parameter \
         -DFDB_WRITE_GRAN="$WG" -DBENCH_OPT="$OPT" \
-        "-DBENCH_BUILD_FLAGS=\"-std=c99 -$OPT\"" "-DBENCH_HOST=\"$(uname -sm)\"" \
+        "-DBENCH_BUILD_FLAGS=\"-std=c99 -D_POSIX_C_SOURCE=199309L -$OPT\"" "-DBENCH_HOST=\"$(uname -sm)\"" \
         "${INCLUDES[@]}" "${SRCS[@]}" \
         -o "$bin"
     printf '%s\n' "$bin"

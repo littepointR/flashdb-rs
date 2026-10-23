@@ -10,6 +10,11 @@
 //! image_tool selfcheck <wg>         # write twice, compare, read back, sha256
 //! ```
 //!
+//! `<wg>` is the flash write granularity in bits and must be one of the six
+//! granularities FlashDB-C supports: 1, 8, 32, 64, 128, 256. The image layout
+//! (sector sizes, status-table widths, header padding) depends on it, exactly
+//! like `FDB_WRITE_GRAN` on the C side.
+//!
 //! Image format: raw concatenation, exactly 32768 bytes
 //!   [0x0000,0x4000)  KV partition  "fdb_kvdb1" (4 x 4096-byte sectors)
 //!   [0x4000,0x8000)  TS partition  "fdb_tsdb1" (4 x 4096-byte sectors)
@@ -451,7 +456,7 @@ fn usage(argv0: &str) {
         "usage: {argv0} write <out.bin> <wg>   # build deterministic image + print summary
        {argv0} read  <in.bin>  <wg>   # mount image (never format) + print summary
        {argv0} selfcheck <wg>         # write twice, compare, read back, sha256
-  <wg> is the flash write granularity in bits: 8 or 1"
+  <wg> is the flash write granularity in bits: 1, 8, 32, 64, 128 or 256"
     );
 }
 
@@ -516,8 +521,12 @@ fn main() {
     let code = match wg {
         8 => run::<8>(cmd, path),
         1 => run::<1>(cmd, path),
+        32 => run::<32>(cmd, path),
+        64 => run::<64>(cmd, path),
+        128 => run::<128>(cmd, path),
+        256 => run::<256>(cmd, path),
         other => {
-            eprintln!("image_tool: <wg> must be 8 or 1 (got {other})");
+            eprintln!("image_tool: <wg> must be 1, 8, 32, 64, 128 or 256 (got {other})");
             std::process::exit(2);
         }
     };

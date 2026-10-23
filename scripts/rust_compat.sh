@@ -2,9 +2,10 @@
 #
 # C <-> Rust on-flash image compatibility matrix.
 #
-#   scripts/rust_compat.sh [--wg 8|1|both] [--out-dir DIR]
+#   scripts/rust_compat.sh [--wg 1|8|32|64|128|256|all] [--out-dir DIR]
 #
-# For every write granularity (FDB_WRITE_GRAN, 8 and 1 by default) this checks:
+# For every write granularity (FDB_WRITE_GRAN; 1, 8, 32, 64, 128 and 256 by
+# default) this checks:
 #
 #   1. Rust selfcheck: deterministic write (twice, byte-compare), read back,
 #      summary equal, SHA-256 printed.
@@ -17,6 +18,17 @@
 #   6. Image SHA-256 of the Rust-written image == SHA-256 of the C-written
 #      image (byte-identical on-flash format).
 #
+# Expected failure (XFAIL), counted separately from FAIL: FlashDB-C's
+# `write_tsl()` copies `sizeof(struct log_idx_data) - LOG_IDX_TS_OFFSET` bytes
+# out of an *uninitialised* stack struct, so it writes the per-record padding
+# (`LOG_IDX_PADDING_SIZE` bytes: 0 for wg 32, 4 for wg 64/128, 20 for wg 256) as
+# stack garbage. For wg 256 this makes the C tool's own output nondeterministic,
+# so byte-identity against the C image is not well-defined. In that case the
+# byte-identity check is reported as XFAIL iff (a) the C tool was shown to be
+# nondeterministic (two C writes differ), (b) the diff report is PADDING-ONLY
+# (Rust writes erased padding there), and (c) every logical check for that
+# granularity still passes. Any other mismatch is a hard FAIL.
+#
 # When the SHAs differ, a first-difference report is produced: first offset,
 # KV/TS region, sector index, offset inside the sector, contiguous diff ranges,
 # and a padding-only vs real-difference classification. Flash-op counters are
@@ -24,26 +36,28 @@
 # intentionally has no sector cache, but the on-flash bytes must match).
 #
 # Artifacts are written to harness/results/rust_compat/ (matrix.txt plus the
-# raw summaries, stats and diffs). Exit status: 0 iff every check passed.
+# raw summaries, stats and diffs). Exit status: 0 iff no hard FAIL remains
+# (XFAIL lines are expected C-reference defects and do not fail the matrix).
 #
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RESULTS="$ROOT/harness/results"
 OUT=""
-WG_LIST="8 1"
+WG_LIST="8 1 32 64 128 256"
 
 usage() {
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --wg)
             case "${2:-}" in
-                8|1) WG_LIST="${2}"; shift 2 ;;
+                1|8|32|64|128|256) WG_LIST="${2}"; shift 2 ;;
                 both) WG_LIST="8 1"; shift 2 ;;
-                *) echo "invalid --wg '${2:-}' (use 8, 1 or both)" >&2; exit 2 ;;
+                all) WG_LIST="8 1 32 64 128 256"; shift 2 ;;
+                *) echo "invalid --wg '${2:-}' (use 1, 8, 32, 64, 128, 256, both or all)" >&2; exit 2 ;;
             esac
             ;;
         --out-dir)
@@ -72,6 +86,7 @@ MATRIX="$OUT/matrix.txt"
 
 PASS=0
 FAIL=0
+XFAIL=0
 
 say()  { printf '%s\n' "$*"; }
 pass() { PASS=$((PASS + 1)); say "PASS  $1"; printf 'PASS  %s\n' "$1" >> "$MATRIX"; }
@@ -79,6 +94,13 @@ fail() {
     FAIL=$((FAIL + 1))
     say "FAIL  $1"
     printf 'FAIL  %s\n' "$1" >> "$MATRIX"
+}
+# Expected, evidence-checked failure (a defect of the C reference, not Rust):
+# does not count as a hard failure and does not affect the exit status.
+xfail() {
+    XFAIL=$((XFAIL + 1))
+    say "XFAIL $1"
+    printf 'XFAIL %s\n' "$1" >> "$MATRIX"
 }
 info() { say "INFO  $1"; printf 'INFO  %s\n' "$1" >> "$MATRIX"; }
 
@@ -220,7 +242,12 @@ else
     echo "rust_compat: FAIL (cannot build)"
     exit 1
 fi
-RUST_BIN="$ROOT/target/release/image_tool"
+RUST_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
+case "$RUST_TARGET_DIR" in
+    /*) ;;
+    *) RUST_TARGET_DIR="$ROOT/$RUST_TARGET_DIR" ;;
+esac
+RUST_BIN="$RUST_TARGET_DIR/release/image_tool"
 
 # ---------------------------------------------------------------------------
 # per write granularity
@@ -228,6 +255,7 @@ RUST_BIN="$ROOT/target/release/image_tool"
 for wg in $WG_LIST; do
     echo
     echo "== WG=${wg} =="
+    WG_FAIL_BASE=$FAIL
 
     RUST_IMG="$OUT/rust_wg${wg}.bin"
     C_IMG="$OUT/c_wg${wg}.bin"
@@ -242,11 +270,26 @@ for wg in $WG_LIST; do
     RUST_READ_C="$OUT/c_wg${wg}.rust_read_c.summary"
 
     # 0. C reference self-check (deterministic image + read-back).
+    #
+    # FlashDB-C writes uninitialised per-record padding for write granularities
+    # above 8 bits (see the header): for wg 256 its own image is therefore not
+    # deterministic. Distinguish that C-side defect from a real failure by
+    # writing the image twice and comparing the raw files; only if the C tool is
+    # nondeterministic is the selfcheck reported as an expected failure.
+    C_NONDET=0
     if "$ROOT/scripts/c_image.sh" selfcheck "$wg" \
             >"$OUT/c_wg${wg}.selfcheck.txt" 2>&1; then
         pass "WG${wg} C reference selfcheck (deterministic write + read back)"
     else
-        fail "WG${wg} C reference selfcheck (see ${OUT#"$ROOT"/}/c_wg${wg}.selfcheck.txt)"
+        "$ROOT/scripts/c_image.sh" write "$OUT/c_wg${wg}.det_a.bin" "$wg" >/dev/null 2>&1
+        "$ROOT/scripts/c_image.sh" write "$OUT/c_wg${wg}.det_b.bin" "$wg" >/dev/null 2>&1
+        if ! cmp -s "$OUT/c_wg${wg}.det_a.bin" "$OUT/c_wg${wg}.det_b.bin"; then
+            C_NONDET=1
+            xfail "WG${wg} C reference selfcheck: C tool output is nondeterministic (FlashDB-C writes uninitialised log-index padding; see ${OUT#"$ROOT"/}/c_wg${wg}.selfcheck.txt)"
+        else
+            fail "WG${wg} C reference selfcheck (see ${OUT#"$ROOT"/}/c_wg${wg}.selfcheck.txt)"
+        fi
+        rm -f "$OUT/c_wg${wg}.det_a.bin" "$OUT/c_wg${wg}.det_b.bin"
     fi
 
     # 1. Rust selfcheck.
@@ -327,11 +370,17 @@ for wg in $WG_LIST; do
     if [ -n "$RUST_SHA" ] && [ "$RUST_SHA" = "$C_SHA" ]; then
         pass "WG${wg} image sha256 rust == C (byte-identical image)"
     else
-        fail "WG${wg} image sha256 rust != C"
         REPORT="$OUT/rust_wg${wg}_firstdiff.txt"
         first_diff "$RUST_IMG" "$C_IMG" "$REPORT"
-        sed -n '1,20p' "$REPORT" | sed 's/^/      /'
-        echo "      full report: ${REPORT#"$ROOT"/}"
+        if [ "$C_NONDET" -eq 1 ] && [ "$FAIL" -eq "$WG_FAIL_BASE" ] \
+                && grep -q "classification: PADDING-ONLY" "$REPORT"; then
+            xfail "WG${wg} image sha256 rust != C: diff is PADDING-ONLY and the C image is nondeterministic (FlashDB-C writes uninitialised log-index padding; Rust writes erased 0xFF). Byte-identity is undefined on the C side for this granularity; all logical checks passed."
+            sed -n '1,3p' "$REPORT" | sed 's/^/      /'
+        else
+            fail "WG${wg} image sha256 rust != C"
+            sed -n '1,20p' "$REPORT" | sed 's/^/      /'
+            echo "      full report: ${REPORT#"$ROOT"/}"
+        fi
     fi
 
     # Flash-op counters: informational only.
@@ -360,12 +409,12 @@ done
 echo
 echo "== matrix =="
 cat "$MATRIX"
-TOTAL=$((PASS + FAIL))
+TOTAL=$((PASS + FAIL + XFAIL))
 echo
-echo "rust_compat: ${PASS}/${TOTAL} checks passed"
+echo "rust_compat: ${PASS}/${TOTAL} checks passed (${XFAIL} expected XFAIL, ${FAIL} failed)"
 if [ "$FAIL" -ne 0 ]; then
     echo "rust_compat: FAIL (${FAIL} failed; artifacts in ${OUT#"$ROOT"/})"
     exit 1
 fi
-echo "rust_compat: OK (all checks passed; Rust and C images are byte-identical)"
+echo "rust_compat: OK (all enforced checks passed; Rust and C images are byte-identical except for documented C-reference XFAILs)"
 exit 0
