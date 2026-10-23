@@ -42,6 +42,9 @@ pub const TSDB_SECTOR_MAGIC: u32 = 0x304C_5354;
 pub const KV_NAME_MAX: usize = 64;
 /// String value buffer size of the legacy `fdb_kv_get()` API.
 pub const STR_KV_VALUE_MAX_SIZE: usize = 128;
+/// Reserved key name used by [`KvdbImpl::auto_update`](crate::KvdbImpl::auto_update)
+/// to persist the schema/defaults version (FlashDB `VER_NUM_KV_NAME`).
+pub const VER_NUM_KV_NAME: &[u8] = b"__ver_num__";
 
 // ---------------------------------------------------------------------------
 // Status values (must match the C enums, they are stored numerically)

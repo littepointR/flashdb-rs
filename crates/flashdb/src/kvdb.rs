@@ -58,7 +58,7 @@ use crate::low;
 use crate::low::{
     align_up, crc32, crc32_u32, decode_status, encode_status, get_u32, put_u32, wg_align, KvLayout,
     KvStatus, SectorDirtyStatus, SectorStoreStatus, FAILED_ADDR, KVDB_SECTOR_MAGIC, KV_MAGIC,
-    KV_NAME_MAX, SECTOR_COMBINED, SECTOR_NOT_COMBINED,
+    KV_NAME_MAX, SECTOR_COMBINED, SECTOR_NOT_COMBINED, VER_NUM_KV_NAME,
 };
 use crate::storage::{Config, Storage};
 
@@ -635,6 +635,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         config: Config,
         defaults: &[(&str, &[u8])],
     ) -> Result<Self, F::Error> {
+        let not_formattable = config.not_formattable;
         let storage = Storage::new(flash, config)?;
         let mut db = Self {
             storage,
@@ -645,7 +646,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
             in_recovery: false,
             last_is_complete_del: false,
         };
-        db.load(defaults)?;
+        db.load(defaults, not_formattable)?;
         Ok(db)
     }
 
@@ -691,6 +692,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         config: Config,
         defaults: &[(&str, &[u8])],
     ) -> Result<(), F::Error> {
+        let not_formattable = config.not_formattable;
         let storage = Storage::new(flash, config)?;
         // SAFETY: all fields of `Self` are initialized exactly once below.
         // `MaybeUninit` guarantees the memory is valid for `Self` and has the
@@ -717,7 +719,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         }
         // SAFETY: every field was initialized above.
         let db = unsafe { slot.assume_init_mut() };
-        db.load(defaults)
+        db.load(defaults, not_formattable)
     }
 
     /// Placement form of [`KvdbImpl::mount`] (no defaults).
@@ -732,6 +734,18 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     /// Consume the database and return the flash driver.
     pub fn into_flash(self) -> F {
         self.storage.into_flash()
+    }
+
+    /// Database sector size in bytes (FlashDB `FDB_KVDB_CTRL_GET_SEC_SIZE`).
+    #[inline]
+    pub fn sec_size(&self) -> u32 {
+        self.storage.sec_size()
+    }
+
+    /// Total database partition size in bytes.
+    #[inline]
+    pub fn max_size(&self) -> u32 {
+        self.storage.max_size()
     }
 
     // -- small helpers ------------------------------------------------------
@@ -1667,6 +1681,85 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         self.read_value_verified(&entry.header(), None, buf)
     }
 
+    /// Copy a slice of `entry`'s value starting at byte `offset` into `buf`
+    /// while verifying the full record CRC32.
+    ///
+    /// This supports reading large values in segments with a small stack
+    /// buffer (matching FlashDB's `fdb_kv_get_obj` + `fdb_blob_read` pattern).
+    /// Returns the number of bytes copied (`0` when `offset >= entry.value_len`).
+    pub fn read_value_at(
+        &mut self,
+        entry: &KvEntry,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, F::Error> {
+        if offset == 0 {
+            return self.read_value_verified(&entry.header(), None, buf);
+        }
+        self.read_value_at_verified(&entry.header(), offset, buf)
+    }
+
+    fn read_value_at_verified(
+        &mut self,
+        hdr: &KvHeader,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, F::Error> {
+        let lay = self.lay();
+        let wg = self.wg();
+        let name_len = hdr.name_len as usize;
+        let value_len = hdr.value_len as usize;
+        let aligned_name = wg_align(name_len, wg);
+        let aligned_value = wg_align(value_len, wg);
+        let name_addr = hdr.addr + lay.kv_hdr_size;
+        let value_addr = name_addr + aligned_name as u32;
+
+        let mut crc = crc_name_len(0, hdr.name_len);
+        crc = crc32_u32(crc, hdr.value_len);
+
+        let mut scratch = [0u8; KV_NAME_MAX];
+        self.storage.read(name_addr, &mut scratch[..aligned_name])?;
+        crc = crc32(crc, &scratch[..aligned_name]);
+
+        let start = core::cmp::min(offset as usize, value_len);
+        let copy_len = core::cmp::min(buf.len(), value_len - start);
+        let end = start + copy_len;
+
+        // 1. Stream-CRC the prefix [0..start].
+        let mut pos = 0usize;
+        while pos < start {
+            let n = core::cmp::min(KV_NAME_MAX, start - pos);
+            self.storage
+                .read(value_addr + pos as u32, &mut scratch[..n])?;
+            crc = crc32(crc, &scratch[..n]);
+            pos += n;
+        }
+        // 2. Read the requested window [start..end] straight into `buf`.
+        if copy_len > 0 {
+            self.storage
+                .read(value_addr + start as u32, &mut buf[..copy_len])?;
+            crc = crc32(crc, &buf[..copy_len]);
+            pos = end;
+        }
+        // 3. Stream-CRC the suffix [end..value_len] and any write-granule padding.
+        while pos < aligned_value {
+            let limit = if pos < value_len {
+                value_len - pos
+            } else {
+                aligned_value - pos
+            };
+            let n = core::cmp::min(KV_NAME_MAX, limit);
+            self.storage
+                .read(value_addr + pos as u32, &mut scratch[..n])?;
+            crc = crc32(crc, &scratch[..n]);
+            pos += n;
+        }
+        if crc != hdr.crc {
+            return Err(Error::ReadCorrupted);
+        }
+        Ok(copy_len)
+    }
+
     // -- mutation -----------------------------------------------------------
 
     /// Set a value (create or update).
@@ -1743,12 +1836,14 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     ) -> Result<bool, F::Error> {
         let lay = self.lay();
         let sec_size = self.storage.sec_size();
-        write_status(
-            &mut self.storage,
-            sec.addr + lay.sec_dirty_off,
-            SEC_STATUS_NUM,
-            SectorDirtyStatus::Gc as usize,
-        )?;
+        if sec.dirty != SectorDirtyStatus::Gc {
+            write_status(
+                &mut self.storage,
+                sec.addr + lay.sec_dirty_off,
+                SEC_STATUS_NUM,
+                SectorDirtyStatus::Gc as usize,
+            )?;
+        }
         let mut kv_addr = sec.addr + lay.sec_hdr_size;
         let mut hdr = KvHeader::EMPTY;
         loop {
@@ -1964,7 +2059,7 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         Ok(())
     }
 
-    fn load(&mut self, defaults: &[(&str, &[u8])]) -> Result<(), F::Error> {
+    fn load(&mut self, defaults: &[(&str, &[u8])], not_formattable: bool) -> Result<(), F::Error> {
         self.in_recovery = true;
         let total = self.storage.sector_count();
 
@@ -1985,6 +2080,10 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
         while addr < max_size {
             self.read_sector_info_into(addr, &mut sec)?;
             if !sec.check_ok {
+                if not_formattable {
+                    self.in_recovery = false;
+                    return Err(Error::NotFormatted);
+                }
                 failed += 1;
             } else if sec.dirty == SectorDirtyStatus::Gc {
                 // Interrupted GC, like `check_and_recovery_gc_cb`. Formatting a
@@ -2053,6 +2152,45 @@ impl<F: Flash, const CACHE: usize> KvdbImpl<F, CACHE> {
     pub fn format_with_defaults(&mut self, defaults: &[(&str, &[u8])]) -> Result<(), F::Error> {
         self.format_all()?;
         self.write_defaults(defaults)
+    }
+
+    /// Schema-versioned default migration (FlashDB `FDB_KV_AUTO_UPDATE` /
+    /// `kv_auto_update`).
+    ///
+    /// Checks the persisted version key [`VER_NUM_KV_NAME`] (`"__ver_num__"`):
+    ///
+    /// * If it exists and equals `version`, returns `Ok(false)` without
+    ///   touching flash.
+    /// * If it is missing or differs from `version`, inserts every `(key, value)`
+    ///   from `defaults` that is **not** currently present in the database
+    ///   (preserving any keys already modified by the application), writes
+    ///   `version` (as 4-byte little-endian `u32`) to [`VER_NUM_KV_NAME`], and
+    ///   returns `Ok(true)`.
+    pub fn auto_update(
+        &mut self,
+        version: u32,
+        defaults: &[(&str, &[u8])],
+    ) -> Result<bool, F::Error> {
+        let mut hdr = KvHeader::EMPTY;
+        if self.find_header_into(VER_NUM_KV_NAME, &mut hdr)? {
+            let mut buf = [0u8; 8];
+            let n = self.read_value_verified(&hdr, Some(VER_NUM_KV_NAME), &mut buf)?;
+            let matches = match (hdr.value_len, n) {
+                (4, 4) => u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) == version,
+                (8, 8) => u64::from_le_bytes(buf) == version as u64,
+                _ => false,
+            };
+            if matches {
+                return Ok(false);
+            }
+        }
+        for &(key, value) in defaults {
+            if self.find_addr(key.as_bytes())? == FAILED_ADDR {
+                self.set(key.as_bytes(), value)?;
+            }
+        }
+        self.set(VER_NUM_KV_NAME, &version.to_le_bytes())?;
+        Ok(true)
     }
 
     /// Verify the CRC32 of every committed record.
@@ -2155,6 +2293,17 @@ impl<'a, F: Flash, const CACHE: usize> KvIterator<'a, F, CACHE> {
     /// Copy the value of `entry` into `buf`; returns the copied length.
     pub fn read_value(&mut self, entry: &KvEntry, buf: &mut [u8]) -> Result<usize, F::Error> {
         self.db.read_value_verified(&entry.header(), None, buf)
+    }
+
+    /// Copy a slice of `entry`'s value starting at byte `offset` into `buf`,
+    /// verifying the full record CRC32.
+    pub fn read_value_at(
+        &mut self,
+        entry: &KvEntry,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, F::Error> {
+        self.db.read_value_at(entry, offset, buf)
     }
 }
 

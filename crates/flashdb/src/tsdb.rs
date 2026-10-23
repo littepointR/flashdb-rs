@@ -518,9 +518,10 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     ///   appends are rejected. It must be smaller than the sector size.
     ///
     /// If no valid sector header is found the database is formatted and
-    /// mounted empty (unless a previous instance marked it non-formattable,
-    /// which this API does not expose yet).
+    /// mounted empty (unless [`Config::not_formattable`] is set, in which
+    /// case mounting fails with [`Error::NotFormatted`]).
     pub fn mount(flash: F, config: Config, max_len: u32) -> Result<Self, F::Error> {
+        let not_formattable = config.not_formattable;
         let storage = Storage::new(flash, config)?;
         let mut db = Self {
             storage,
@@ -529,7 +530,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             max_len,
             rollover: true,
         };
-        db.mount_inner()?;
+        db.mount_inner(not_formattable)?;
         Ok(db)
     }
 
@@ -558,6 +559,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         config: Config,
         max_len: u32,
     ) -> Result<(), F::Error> {
+        let not_formattable = config.not_formattable;
         let storage = Storage::new(flash, config)?;
         // SAFETY: `slot` is valid, aligned, writable memory for `Self` and no
         // reference to the (not yet initialized) value is created: every field
@@ -572,7 +574,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
             core::ptr::addr_of_mut!((*p).rollover).write(true);
             slot.assume_init_mut()
         };
-        db.mount_inner()
+        db.mount_inner(not_formattable)
     }
 
     /// On-flash layout for this database, resolved from the compile-time flash
@@ -592,7 +594,7 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
 
     /// Shared mount/recovery logic used by [`TsdbImpl::mount`] and
     /// [`TsdbImpl::mount_into`] (`fdb_tsdb_init`).
-    fn mount_inner(&mut self) -> Result<(), F::Error> {
+    fn mount_inner(&mut self, not_formattable: bool) -> Result<(), F::Error> {
         if ts_layout::<F, T>().is_none() {
             return Err(Error::UnsupportedWriteGran);
         }
@@ -663,6 +665,9 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
         }
 
         if check_failed {
+            if not_formattable {
+                return Err(Error::NotFormatted);
+            }
             /* Headers are damaged: re-format the whole database. */
             self.format_all()?;
             /* fdb_tsdb_init reads the current sector once more after formatting. */
@@ -906,6 +911,46 @@ impl<F: Flash, T: Timestamp> TsdbImpl<F, T> {
     /// Maximum payload length accepted by [`TsdbImpl::append`].
     pub fn max_len(&self) -> u32 {
         self.max_len
+    }
+
+    /// Database sector size in bytes (FlashDB `FDB_TSDB_CTRL_GET_SEC_SIZE`).
+    #[inline]
+    pub fn sec_size(&self) -> u32 {
+        self.storage.sec_size()
+    }
+
+    /// Total database partition size in bytes.
+    #[inline]
+    pub fn max_size(&self) -> u32 {
+        self.storage.max_size()
+    }
+
+    /// Read the payload of `entry` into `buf`.
+    ///
+    /// Returns the number of bytes read, which is the smaller of `buf.len()`
+    /// and the payload length.
+    pub fn read_blob(&mut self, entry: &TslEntry<T>, buf: &mut [u8]) -> Result<usize, F::Error> {
+        self.read_blob_at(entry, 0, buf)
+    }
+
+    /// Read a slice of `entry`'s payload starting at byte `offset` into `buf`.
+    ///
+    /// Returns the number of bytes read (`0` when `offset >= entry.log_len` or
+    /// the entry has no payload).
+    pub fn read_blob_at(
+        &mut self,
+        entry: &TslEntry<T>,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, F::Error> {
+        if entry.log_addr == FAILED_ADDR || offset >= entry.log_len || buf.is_empty() {
+            return Ok(0);
+        }
+        let avail = entry.log_len - offset;
+        let len = core::cmp::min(buf.len() as u32, avail) as usize;
+        self.storage
+            .read(entry.log_addr + offset, &mut buf[..len])?;
+        Ok(len)
     }
 
     /// Consume the database and return the flash driver.
@@ -1400,6 +1445,16 @@ impl<'a, F: Flash, T: Timestamp> TslIterator<'a, F, T> {
         let len = core::cmp::min(buf.len() as u32, entry.log_len) as usize;
         self.db.storage.read(entry.log_addr, &mut buf[..len])?;
         Ok(len)
+    }
+
+    /// Read a slice of `entry`'s payload starting at byte `offset` into `buf`.
+    pub fn read_blob_at(
+        &mut self,
+        entry: &TslEntry<T>,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, F::Error> {
+        self.db.read_blob_at(entry, offset, buf)
     }
 
     /// Read the entry at `index` if it is inside the current sector's index

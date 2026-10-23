@@ -86,11 +86,11 @@ mod storage;
 mod tsdb;
 
 pub use error::{Error, Result};
-pub use flash::Flash;
+pub use flash::{Flash, Partition};
 pub use kvdb::{KvEntry, KvIterator, KvStats, Kvdb, KvdbImpl, KvdbNoCache, KvdbSmallCache};
 pub use low::{
     crc32, KvStatus, SectorDirtyStatus, SectorStoreStatus, TslStatus, KV_NAME_MAX,
-    STR_KV_VALUE_MAX_SIZE,
+    STR_KV_VALUE_MAX_SIZE, VER_NUM_KV_NAME,
 };
 pub use storage::Config;
 pub use tsdb::{Timestamp, Tsdb, Tsdb64, TsdbImpl, TslEntry, TslIterator};
